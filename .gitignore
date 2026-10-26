@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.tools/
+.dev/
+.env
+.env.*
+coverage/
+*.tgz
+*.log
+*.exe
+*.test
+*.tsbuildinfo
+
+test-results/
+playwright-report/
+
