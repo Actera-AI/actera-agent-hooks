@@ -26,7 +26,8 @@ const expected = [
   'src/core/bridge.mjs', 'src/core/defaults.mjs', 'src/core/delivery.mjs', 'src/core/generated/outcomes.mjs',
   'src/core/input-capture.mjs', 'src/core/pairing.mjs', 'src/core/scanner-client.mjs',
   'src/hosts/claude-code/bridge.mjs', 'src/hosts/claude-code/cli.mjs', 'src/hosts/claude-code/settings.mjs',
-  'src/hosts/codex/bridge.mjs', 'src/hosts/codex/cli.mjs', 'src/hosts/codex/settings.mjs',
+  'src/hosts/codex/bridge.mjs', 'src/hosts/codex/cli.mjs', 'src/hosts/codex/mcp-server.mjs',
+  'src/hosts/codex/pre-tool-use.mjs', 'src/hosts/codex/review.mjs', 'src/hosts/codex/settings.mjs',
   'vendor/gitleaks/LICENSE', 'vendor/gitleaks/THIRD_PARTY_NOTICES.txt', 'vendor/gitleaks/manifest.json',
   ...platforms.map(platform => `vendor/gitleaks/${platform}.gz`),
 ].sort()

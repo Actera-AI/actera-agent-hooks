@@ -9,6 +9,7 @@ import {
   credentialID,
   decisionStatus,
   loadConfig as loadConnection,
+  loadReviewer,
   localStatus,
   queueOutcomeReport,
   rememberAdmittedCall,
@@ -19,8 +20,8 @@ import { runtimeSettings } from './settings.mjs'
 
 // Codex hook adapter: maps Codex's hook events onto Actera decisions, call
 // identities and execution reports, and Decisions back onto Codex's
-// PreToolUse output. Codex cannot prompt from a hook, so a call that needs
-// approval is held here while a reviewer decides in Actera, Slack or email.
+// PreToolUse output. A call that needs approval is held here while a
+// reviewer decides in Actera, Slack or email, or in Codex (see review.mjs).
 // Codex (0.165, Windows) does not finish a call until every process its hook
 // started has exited, so this adapter starts no background helpers: reports
 // are sent from the hook itself and the scanner runs once per call.
@@ -225,16 +226,18 @@ export async function enqueueToolOutcome(hook, config, home = bridgeHome()) {
 
 // Wait for a reviewer while Codex waits for this hook. An approval releases
 // exactly this call; anything else ends the hold with the current status.
-export async function holdForApproval(config, decision, home = bridgeHome(), { holdMs, pollMs } = {}) {
+// Aborting stops the wait without claiming an approval.
+export async function holdForApproval(config, decision, home = bridgeHome(), { holdMs, pollMs, signal } = {}) {
   const deadline = Date.now() + holdMs
   let current = decision
-  while (Date.now() < deadline) {
-    await delay(Math.min(pollMs, Math.max(0, deadline - Date.now())))
+  while (Date.now() < deadline && !signal?.aborted) {
     try {
+      await delay(Math.min(pollMs, Math.max(0, deadline - Date.now())), undefined, { signal })
       current = await decisionStatus(config, decision.id)
     } catch {
       continue // A transient lookup failure keeps the call held, never released.
     }
+    if (signal?.aborted) break
     if (current.status === 'APPROVED')
       return (await claimApproval(home, decision.id)) ? current : { ...current, status: 'ALREADY_RELEASED' }
     if (current.status !== 'PENDING_APPROVAL') return current
@@ -244,16 +247,21 @@ export async function holdForApproval(config, decision, home = bridgeHome(), { h
 
 // Codex shows these reasons to the model, which relays them to the person.
 export function codexToolDecision(decision) {
-  // Ordinary ALLOWED decisions leave Codex's own approval flow unchanged.
-  if (decision.status === 'ALLOWED') return null
-  const deny = (reason) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } })
+  // Codex (0.165) rejects permissionDecision "allow" as a hook failure, so an
+  // allowed or approved call returns nothing and Codex's own approval flow
+  // still applies.
+  if (decision.status === 'ALLOWED' || decision.status === 'APPROVED') return null
+  // Codex appends ". Command: ..." to the reason, so it carries no final period.
+  const deny = (reason) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason.replace(/\.$/, '') } })
   const review = decision.review_url ? ` Review it at ${decision.review_url}.` : ''
-  if (decision.status === 'APPROVED')
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: `Approved in Actera (decision ${decision.id})${decision.reason ? `: ${decision.reason}` : ''}.` } }
   if (decision.status === 'PENDING_APPROVAL')
     return deny(`Actera decision ${decision.id} is still waiting for a reviewer.${review} Once it is approved, retry this exact tool call; the approval releases one matching retry.`)
   if (decision.status === 'ALREADY_RELEASED')
     return deny(`Actera decision ${decision.id} was approved, but that approval already released another call.`)
+  if (decision.status === 'REVIEW_FAILED')
+    return deny(`Actera did not record your review of decision ${decision.id}: ${decision.explanation} The call is still held; retry it to review again or approve it in Actera.`)
+  if (decision.status === 'REJECTED' && decision.reviewedIn === 'codex')
+    return deny(`The person denied this tool call in Codex (Actera decision ${decision.id}). Do not retry it unless they ask.`)
   if (decision.status === 'REJECTED')
     return deny(`A reviewer rejected this tool call in Actera (decision ${decision.id})${decision.reason ? `: ${decision.reason}` : '.'}`)
   return deny(`Actera decision ${decision.id} ${decision.status.toLowerCase().replaceAll('_', ' ')}: ${decision.explanation || 'Tool call not allowed.'}`)
@@ -291,6 +299,8 @@ export async function status(home = bridgeHome(), env = process.env) {
     settingsManagedBy: '$actera-mode',
     ...(config ? { baseUrl: config.baseUrl, agentId: config.agentId, capture: config.capture, mode: config.mode, onEvaluationError: config.onEvaluationError } : {}),
     lastHook,
+    // Whether this machine holds a reviewer link; Actera confirms it per review.
+    ...(config ? { reviewerLinked: await loadReviewer(config, home).then(() => true, () => false) } : {}),
     ...(config && !lastHook ? { hooksNeedAttention: 'No Actera hook has run in Codex yet. Open /hooks in Codex, trust the Actera hooks, then start a new session.' } : {}),
     // Reports are sent by the hooks themselves; there is no background worker.
     ...local,

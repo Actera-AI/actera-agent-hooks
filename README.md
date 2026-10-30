@@ -14,7 +14,7 @@ layout settles. The Actera service requires an account.
 | --- | --- |
 | `src/core/` | Connection, queue, delivery worker, input capture, scanner client, and pairing (browser approval or a setup code). No host field names. |
 | `src/hosts/claude-code/` | Maps Claude Code hook events to decisions and reports, and Decisions back to `PreToolUse` output. Also the `actera-hook.mjs` command line. |
-| `src/hosts/codex/` | The same for Codex. Codex hooks cannot prompt, so a call that needs approval is held while a reviewer decides in Actera, Slack or email. Outcomes come from the Codex session transcript. |
+| `src/hosts/codex/` | The same for Codex, plus the MCP server behind the plugin's `PreToolUse` hook, which lets the person review a held call in Codex. Outcomes come from the Codex session transcript. |
 | `bin/delivery-worker.mjs` | The background sender the core spawns per bridge directory. |
 | `vendor/gitleaks/` | Six verified Gitleaks helper builds and their notices. |
 | `scanner/` | Go source for the helper. |
@@ -48,12 +48,33 @@ node actera-hook.mjs connect --setup-code <code>   # or a setup code from Actera
 node actera-hook.mjs mode enforcing
 node actera-hook.mjs evaluation-failure block
 node actera-hook.mjs status
+node actera-hook.mjs link                          # review held calls in Codex
 ```
 
 `ACTERA_MODE` and `ACTERA_EVALUATION_FAILURE` override the stored values. In Enforcing
 mode, a call that needs approval waits up to `ACTERA_HOLD_SECONDS` (540 by default) for a
 reviewer; the plugin sets Codex's hook timeout to 600 seconds. If the hold runs out, the
 call is denied and an identical retry within an hour reuses the approval once.
+
+### Reviewing in Codex
+
+A command hook cannot ask the person anything, so the plugin's `PreToolUse` hook is an
+`mcp_tool` hook: Codex calls `pre_tool_use` on the plugin's MCP server
+(`src/hosts/codex/mcp-server.mjs`), which makes the same decision as the command hook. While a
+call is held, the server asks in Codex through MCP elicitation:
+
+- If Codex is not linked to the person's Actera account, it offers to link it (the same
+  reviewer link as Claude Code), or to wait for a reviewer.
+- Once linked, it asks to allow the call once or deny it. Actera checks that the person may
+  review it and records the choice; an approval releases this call only.
+- The hold keeps polling meanwhile, so a review in Actera, Slack or email still decides the
+  call and withdraws the prompt. A prompt nobody answers, or one Codex declines because it
+  cannot show it (`codex exec`, approval policy `never`), leaves the call held as before.
+
+Codex treats `permissionDecision: "allow"` as a hook failure, so an approved call returns
+no output and Codex's own approval rules still apply to it. The server refuses calls that
+carry Codex's model-call metadata, so the model cannot call `pre_tool_use` itself. Codex
+passes MCP servers only the environment variables named in their `env_vars`.
 
 Codex reports no success flag to `PostToolUse`. The adapter reads the call's status from the
 session transcript Codex names in the hook input; when that record is missing it reports

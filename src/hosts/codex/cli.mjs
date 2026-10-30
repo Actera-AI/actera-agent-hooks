@@ -3,46 +3,27 @@ import {
   agentReadiness,
   deliverBatch,
   disconnect,
-  enqueueDecision,
-  previousApproval,
   provisionBridge,
   recordEvaluationError,
-  rememberPendingApproval,
-  requestDecision,
+  reviewerLinkStatus,
+  startReviewerLink,
 } from '../../core/bridge.mjs'
 import { stopDelivery } from '../../core/delivery.mjs'
-import { connectWithSetupCode, pair } from '../../core/pairing.mjs'
+import { connectWithSetupCode, openBrowser, pair } from '../../core/pairing.mjs'
 import { stopScanner } from '../../core/scanner-client.mjs'
 import {
-  activityForHook,
-  approvalFingerprint,
   bridgeHome,
   codexEvaluationFailure,
-  codexToolDecision,
   enqueueToolOutcome,
-  evaluationForHook,
   holdForApproval,
   loadConfig,
   readHookInput,
   recordHookRun,
-  rememberToolDecision,
   status,
 } from './bridge.mjs'
+import { deliverQueued, holdMs, pollMs, preToolUse } from './pre-tool-use.mjs'
 import { SettingsError, saveSetting } from './settings.mjs'
 import path from 'node:path'
-
-// Codex's hook timeout is set to 600 seconds in the plugin, so a held call
-// gives up a minute earlier and tells the agent how to continue.
-const holdMs = () => (Number(process.env.ACTERA_HOLD_SECONDS) || 540) * 1000
-const pollMs = () => Number(process.env.ACTERA_HOLD_POLL_MS) || 2000
-
-// Codex waits for every process a hook starts, so queued reports are sent
-// from the hook itself rather than a background worker. A failure leaves them
-// queued (with a short back-off) for the next hook or an explicit flush.
-async function deliverQueued(config, home) {
-  const result = await deliverBatch(config, { home, limit: 8, timeoutMs: 3000 })
-  if (result.error) await recordEvaluationError(new Error(`Report delivery: ${result.error}`), home)
-}
 
 function option(name) {
   const index = process.argv.indexOf(`--${name}`)
@@ -56,42 +37,6 @@ async function readText(stream) {
     if (value.length > 4096) throw new Error('API key input is too long')
   }
   return value
-}
-
-async function preToolUse(hook, config, home) {
-  let output
-  let evaluationError
-  let request
-  let decision
-  const monitoring = config.mode === 'MONITORING'
-  try {
-    const activity = await activityForHook(hook, config, home)
-    if (activity.details.tool_input_omitted && activity.details.tool_input_omitted !== 'metadata_only')
-      evaluationError = new Error(`Actera tool inputs unavailable: ${activity.details.tool_input_omitted}`)
-    request = evaluationForHook(hook, config, activity)
-    await rememberToolDecision(hook, config, request, undefined, home)
-    const fingerprint = approvalFingerprint(hook, config)
-    decision = monitoring ? undefined : await previousApproval(home, fingerprint, config, request)
-    if (!decision) {
-      decision = await requestDecision(config, request)
-      if (!monitoring) await rememberPendingApproval(home, fingerprint, decision, request)
-    }
-    if (!monitoring && decision.status === 'PENDING_APPROVAL')
-      decision = await holdForApproval(config, decision, home, { holdMs: holdMs(), pollMs: pollMs() })
-    await rememberToolDecision(hook, config, request, decision, home)
-    output = monitoring ? null : codexToolDecision(decision)
-  } catch (error) {
-    evaluationError = error
-    output = !monitoring && config.onEvaluationError === 'deny' ? codexEvaluationFailure(error) : null
-  }
-  try {
-    if (request && !decision) await enqueueDecision(request, home)
-    if (evaluationError) await recordEvaluationError(evaluationError, home)
-    await deliverQueued(config, home)
-  } catch (error) {
-    await recordEvaluationError(error, home).catch(() => {})
-  }
-  if (output) process.stdout.write(JSON.stringify(output) + '\n')
 }
 
 async function connect(home) {
@@ -162,6 +107,18 @@ async function main() {
     process.stdout.write(JSON.stringify(await agentReadiness(config, undefined, home)) + '\n')
     return
   }
+  if (command === 'link') {
+    if (!config) throw new Error('Connect first with $actera-connect')
+    const link = await startReviewerLink(config, home)
+    openBrowser(link.browserUrl)
+    process.stdout.write(`Link your signed-in Actera account in the page that just opened.\nIf it did not open, visit: ${link.browserUrl}\n`)
+    return
+  }
+  if (command === 'link-status') {
+    if (!config) throw new Error('Connect first with $actera-connect')
+    process.stdout.write(JSON.stringify(await reviewerLinkStatus(config, home)) + '\n')
+    return
+  }
   if (command === 'flush') {
     if (!config) throw new Error('Run setup first')
     const result = await deliverBatch(config, { home, force: true, timeoutMs: 5000 })
@@ -173,7 +130,13 @@ async function main() {
     const hook = await readHookInput(process.stdin)
     if (!config) return
     await recordHookRun(home, hook.hook_event_name).catch(() => {})
-    if (hook.hook_event_name === 'PreToolUse') return preToolUse(hook, config, home)
+    if (hook.hook_event_name === 'PreToolUse') {
+      // Without Codex's MCP review prompt, a held call waits for a reviewer elsewhere.
+      const hold = (decision) => holdForApproval(config, decision, home, { holdMs: holdMs(), pollMs: pollMs() })
+      const output = await preToolUse(hook, config, home, { hold })
+      if (output) process.stdout.write(JSON.stringify(output) + '\n')
+      return
+    }
     try {
       await enqueueToolOutcome(hook, config, home)
       await deliverQueued(config, home)
@@ -182,7 +145,7 @@ async function main() {
     }
     return // Other lifecycle hooks add nothing to Codex's context.
   }
-  throw new Error('Usage: actera-hook.mjs connect [--setup-code CODE | --reconnect] | mode monitoring|enforcing | evaluation-failure block|allow | status | ready | flush | disconnect [--discard] | setup --api-key-stdin | hook')
+  throw new Error('Usage: actera-hook.mjs connect [--setup-code CODE | --reconnect] | mode monitoring|enforcing | evaluation-failure block|allow | status | link | link-status | ready | flush | disconnect [--discard] | setup --api-key-stdin | hook')
 }
 
 main().catch((error) => {

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Review held calls in Codex. `src/hosts/codex/mcp-server.mjs` is an MCP server for the
+  plugin's `PreToolUse` `mcp_tool` hook. While a call is held, it asks the linked person to
+  allow it once or deny it (MCP elicitation), and offers the reviewer link when Codex is not
+  linked yet. A review in Actera still decides the call and withdraws the prompt.
+- The Codex command line links the reviewer account with `link` and `link-status`.
+- Codex approvals return no hook output: Codex 0.165 treats `permissionDecision: "allow"` as
+  a hook failure, which let the call run but reported the hook as failed.
+- Approving or rejecting as the linked person moved to the core (`reviewDecision`,
+  `reviewedElsewhere`). Claude Code requests and messages are unchanged.
+
 ## 0.2.0
 
 - Codex host adapter in `src/hosts/codex/`: decisions as `codex.tool.*` and `codex.mcp.*`,

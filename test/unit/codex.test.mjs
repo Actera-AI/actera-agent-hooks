@@ -13,7 +13,10 @@ import { loadConfig, mcpToolForHook, transcriptOutcome } from '../../src/hosts/c
 import { saveSetting } from '../../src/hosts/codex/settings.mjs'
 
 const cli = fileURLToPath(new URL('../../src/hosts/codex/cli.mjs', import.meta.url))
+const mcpServer = fileURLToPath(new URL('../../src/hosts/codex/mcp-server.mjs', import.meta.url))
 const key = 'actera_' + 'c'.repeat(40)
+const reviewerToken = 'actera_reviewer_' + 'r'.repeat(40)
+const workspaceId = '11111111-1111-4111-8111-111111111111'
 const agentId = 'codex-local-test'
 
 // A controllable Actera: decisions get the status `next` returns; their
@@ -42,6 +45,15 @@ async function fixture(t, { decide = () => 'ALLOWED', available = () => true } =
     if (lookup) {
       const { request: _, ...decision } = decisions.get(lookup[1])
       return response.end(JSON.stringify({ ...decision, review_url: `https://actera.test/ws/decisions/${decision.id}` }))
+    }
+    if (request.url === '/v1/reviewer-links/status') return response.end(JSON.stringify({ linked: request.headers.authorization === `Bearer ${reviewerToken}` }))
+    const review = request.url.match(/^\/v1\/decisions\/([^/]+)\/(approve|reject)$/)
+    if (review) {
+      if (request.headers.authorization !== `Bearer ${reviewerToken}`) { response.statusCode = 403; return response.end('{}') }
+      const decision = decisions.get(review[1])
+      decision.status = review[2] === 'approve' ? 'APPROVED' : 'REJECTED'
+      const { request: _, ...body } = decision
+      return response.end(JSON.stringify(body))
     }
     if (request.url.endsWith('/reports')) { reports.push(parsed); response.statusCode = 201; return response.end('{}') }
     response.statusCode = 404
@@ -133,7 +145,7 @@ test('enforcing denies a blocked call with the reason from Actera', async (t) =>
   await saveSetting(f.home, 'mode', 'enforcing')
   const result = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-1') })
   assert.equal(result.output.hookSpecificOutput.permissionDecision, 'deny')
-  assert.match(result.output.hookSpecificOutput.permissionDecisionReason, /blocked: Fixture blocks this\./)
+  assert.match(result.output.hookSpecificOutput.permissionDecisionReason, /blocked: Fixture blocks this$/)
 })
 
 test('a held call is released when a reviewer approves it while the hook waits', async (t) => {
@@ -144,8 +156,9 @@ test('a held call is released when a reviewer approves it while the hook waits',
   await new Promise((resolve) => setTimeout(resolve, 200))
   ;[...f.decisions.values()][0].status = 'APPROVED'
   const result = await held
-  assert.equal(result.output.hookSpecificOutput.permissionDecision, 'allow')
-  assert.match(result.output.hookSpecificOutput.permissionDecisionReason, /^Approved in Actera \(decision [0-9a-f-]{36}\)\.$/)
+  // Codex rejects "allow" from a hook, so an approval leaves the call to Codex.
+  assert.equal(result.code, 0)
+  assert.equal(result.output, null)
   // The approval released that call; an identical retry needs its own approval.
   const again = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2') }, { ACTERA_HOLD_SECONDS: '0.3' })
   assert.equal(again.output.hookSpecificOutput.permissionDecision, 'deny')
@@ -169,7 +182,7 @@ test('a hold that runs out denies, and the approved retry reuses the same Decisi
   assert.match(first.output.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
   ;[...f.decisions.values()][0].status = 'APPROVED'
   const retry = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2') })
-  assert.equal(retry.output.hookSpecificOutput.permissionDecision, 'allow')
+  assert.equal(retry.output, null)
   assert.equal(f.decisions.size, 1, 'The retry must reuse the approved Decision')
   const changed = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-3', 'echo other') }, { ACTERA_HOLD_SECONDS: '0.3' })
   assert.equal(changed.output.hookSpecificOutput.permissionDecision, 'deny')
@@ -266,6 +279,7 @@ test('status says when no hook has run since connecting', async (t) => {
   assert.equal(after.hooksNeedAttention, undefined)
   assert.equal(after.lastHook.event, 'PreToolUse')
   assert.equal(after.delivery, undefined, 'Codex has no background delivery worker to report')
+  assert.equal(after.reviewerLinked, false)
 })
 
 test('browser pairing and setup codes ask Actera for a Codex connection', async (t) => {
@@ -307,4 +321,133 @@ test('browser pairing and setup codes ask Actera for a Codex connection', async 
   assert.equal(again.alreadyConnected, true)
   await connectWithSetupCode({ client: 'codex', home, origin, code: '7AHV-F8T0-M349-HPF7' })
   assert.deepEqual(seen.find((r) => r.path === '/v1/agent-setup-codes/redeem').body, { code: '7AHV-F8T0-M349-HPF7', client: 'codex' })
+})
+
+// Codex's side of the plugin's MCP server: the PreToolUse mcp_tool hook calls
+// pre_tool_use, and `answer` plays the person answering each Codex prompt.
+function mcpSession(t, home, { answer, env = {}, elicitation = { form: {}, url: {} } }) {
+  const child = spawn(process.execPath, [mcpServer], {
+    env: { ...process.env, ACTERA_CODEX_BRIDGE_HOME: home, ACTERA_HOLD_POLL_MS: '50', ...env },
+    windowsHide: true,
+  })
+  t.after(() => child.kill())
+  const waiting = new Map()
+  const prompts = []
+  const cancelled = []
+  let nextId = 1
+  let buffer = ''
+  child.stdout.on('data', async (chunk) => {
+    buffer += chunk
+    let newline
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const message = JSON.parse(buffer.slice(0, newline))
+      buffer = buffer.slice(newline + 1)
+      if (message.method === 'elicitation/create') {
+        prompts.push(message.params)
+        const result = await answer(message.params, prompts.length)
+        if (result) child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\n')
+      } else if (message.method === 'notifications/cancelled') cancelled.push(message.params.requestId)
+      else waiting.get(message.id)?.(message.result)
+    }
+  })
+  const request = (method, params) => new Promise((resolve) => {
+    const id = nextId++
+    waiting.set(id, resolve)
+    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n')
+  })
+  const ready = request('initialize', { protocolVersion: '2025-06-18', capabilities: elicitation ? { elicitation } : {}, clientInfo: { name: 'codex-mcp-client', version: 'test' } })
+  return {
+    prompts,
+    cancelled,
+    async check(input, meta = { threadId: 'thread-1', progressToken: 1 }) {
+      await ready
+      const result = await request('tools/call', { name: 'pre_tool_use', arguments: input, _meta: meta })
+      return result.isError ? { error: result.content[0].text } : JSON.parse(result.content[0].text)
+    },
+  }
+}
+
+async function linkReviewer(f) {
+  const { credentialID } = await import('../../src/core/bridge.mjs')
+  const config = await loadConfig(f.home)
+  await writeFile(path.join(f.home, 'reviewer.json'), JSON.stringify({ token: reviewerToken, workspaceId, baseUrl: config.baseUrl, agentId, credentialId: credentialID(config) }))
+}
+
+const choice = (value) => ({ action: 'accept', content: { choice: value } })
+
+test('a linked person approves a held call in Codex and Actera records it', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  await linkReviewer(f)
+  const codex = mcpSession(t, f.home, { answer: () => choice('approve') })
+  const output = await codex.check(call('exec-1', 'npm publish'))
+  assert.deepEqual(output, {}, 'An approval leaves the call to Codex')
+  assert.equal(codex.prompts.length, 1)
+  assert.match(codex.prompts[0].message, /^Allow Codex to use bash\?\nCommand: npm publish\n/)
+  assert.deepEqual(codex.prompts[0].requestedSchema.properties.choice.enumNames, ['Allow once', 'Deny'])
+  const id = [...f.decisions.keys()][0]
+  const approval = f.requests.find((r) => r.path === `/v1/decisions/${id}/approve`)
+  assert.equal(approval.body.idempotency_key, `codex-native-approve:${id}`)
+  // The approval released this call only; an identical retry is held again.
+  const retry = await mcpSession(t, f.home, { answer: () => ({ action: 'decline' }), env: { ACTERA_HOLD_SECONDS: '0.4' } }).check(call('exec-2', 'npm publish'))
+  assert.equal(retry.hookSpecificOutput.permissionDecision, 'deny')
+})
+
+test('denying in Codex rejects the Decision and tells the agent not to retry', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  await linkReviewer(f)
+  const output = await mcpSession(t, f.home, { answer: () => choice('reject') }).check(call('exec-1'))
+  const id = [...f.decisions.keys()][0]
+  assert.equal(output.hookSpecificOutput.permissionDecision, 'deny')
+  assert.equal(output.hookSpecificOutput.permissionDecisionReason, `The person denied this tool call in Codex (Actera decision ${id}). Do not retry it unless they ask`)
+  assert.equal(f.requests.find((r) => r.path === `/v1/decisions/${id}/reject`).body.reason, 'Declined in Codex')
+})
+
+test('a review in Actera closes the open Codex prompt and decides the call', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  await linkReviewer(f)
+  const codex = mcpSession(t, f.home, { answer: () => undefined })
+  const checked = codex.check(call('exec-1'))
+  while (!codex.prompts.length) await new Promise((resolve) => setTimeout(resolve, 20))
+  Object.assign([...f.decisions.values()][0], { status: 'REJECTED', reason: 'Not during the freeze' })
+  const output = await checked
+  assert.match(output.hookSpecificOutput.permissionDecisionReason, /A reviewer rejected this tool call in Actera .*: Not during the freeze/)
+  assert.equal(codex.cancelled.length, 1, 'The prompt was withdrawn')
+})
+
+test('no answer in Codex keeps the call held for a reviewer elsewhere', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  await linkReviewer(f)
+  // codex exec and approval policy "never" decline every prompt.
+  const declined = await mcpSession(t, f.home, { answer: () => ({ action: 'decline' }), env: { ACTERA_HOLD_SECONDS: '0.4' } }).check(call('exec-1'))
+  assert.match(declined.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
+  const noElicitation = mcpSession(t, f.home, { answer: () => choice('approve'), elicitation: null, env: { ACTERA_HOLD_SECONDS: '0.4' } })
+  const unasked = await noElicitation.check(call('exec-2', 'echo other'))
+  assert.match(unasked.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
+  assert.equal(noElicitation.prompts.length, 0)
+  assert.equal(f.requests.filter((r) => /\/(approve|reject)$/.test(r.path)).length, 0)
+})
+
+test('an unlinked person is offered linking before reviewing in Codex', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const codex = mcpSession(t, f.home, { answer: () => choice('wait'), env: { ACTERA_HOLD_SECONDS: '0.4' } })
+  const output = await codex.check(call('exec-1'))
+  assert.match(codex.prompts[0].message, /Link Codex to your Actera account to review it here/)
+  assert.deepEqual(codex.prompts[0].requestedSchema.properties.choice.enum, ['link', 'wait'])
+  assert.match(output.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
+})
+
+test('the MCP server refuses calls from the model and leaves allowed calls to Codex', async (t) => {
+  const f = await fixture(t)
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const codex = mcpSession(t, f.home, { answer: () => undefined })
+  const refused = await codex.check(call('exec-1'), { callId: 'exec-1', 'x-codex-turn-metadata': { turn_id: 'turn-1' } })
+  assert.match(refused.error, /only for the Actera hook/)
+  assert.equal(f.decisions.size, 0)
+  assert.deepEqual(await codex.check(call('exec-2')), {})
+  assert.equal(f.decisions.size, 1)
 })
