@@ -8,6 +8,10 @@
 - The Codex adapter leaves no process running after a hook: reports are delivered from the
   hook and the scanner runs once per call. A lingering helper made Codex wait indefinitely
   on the first call of a session.
+- Browser pairing and setup codes live in the core (`src/core/pairing.mjs`) and name the
+  connecting plugin, so Actera labels Codex connections as Codex.
+- Codex messages name where to review a held call and carry a reviewer's rejection reason.
+  Status reports when no hook has run, which means Codex has not trusted them.
 - The core can keep a host's scanner cache in that host's bridge folder, scan with a private
   one-shot helper, and look up a Decision's narrow status. Claude Code behavior is unchanged.
 

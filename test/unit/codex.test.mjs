@@ -41,7 +41,7 @@ async function fixture(t, { decide = () => 'ALLOWED', available = () => true } =
     const lookup = request.url.match(/^\/v1\/decisions\/([^/]+)\/status$/)
     if (lookup) {
       const { request: _, ...decision } = decisions.get(lookup[1])
-      return response.end(JSON.stringify(decision))
+      return response.end(JSON.stringify({ ...decision, review_url: `https://actera.test/ws/decisions/${decision.id}` }))
     }
     if (request.url.endsWith('/reports')) { reports.push(parsed); response.statusCode = 201; return response.end('{}') }
     response.statusCode = 404
@@ -57,6 +57,18 @@ async function fixture(t, { decide = () => 'ALLOWED', available = () => true } =
   const baseUrl = `http://127.0.0.1:${server.address().port}`
   await configure({ baseUrl, apiKey: key, agentId, capture: 'tool-inputs' }, home)
   return { home, baseUrl, decisions, reports, requests }
+}
+
+function runCli(home, args, env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { env: { ...process.env, ACTERA_CODEX_BRIDGE_HOME: home, ...env }, windowsHide: true })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', (code) => resolve({ code, stdout, stderr }))
+    child.stdin.end()
+  })
 }
 
 function runHook(home, input, env = {}) {
@@ -133,7 +145,7 @@ test('a held call is released when a reviewer approves it while the hook waits',
   ;[...f.decisions.values()][0].status = 'APPROVED'
   const result = await held
   assert.equal(result.output.hookSpecificOutput.permissionDecision, 'allow')
-  assert.match(result.output.hookSpecificOutput.permissionDecisionReason, /approved$/)
+  assert.match(result.output.hookSpecificOutput.permissionDecisionReason, /^Approved in Actera \(decision [0-9a-f-]{36}\)\.$/)
   // The approval released that call; an identical retry needs its own approval.
   const again = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2') }, { ACTERA_HOLD_SECONDS: '0.3' })
   assert.equal(again.output.hookSpecificOutput.permissionDecision, 'deny')
@@ -154,7 +166,7 @@ test('a hold that runs out denies, and the approved retry reuses the same Decisi
   const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
   await saveSetting(f.home, 'mode', 'enforcing')
   const first = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-1') }, { ACTERA_HOLD_SECONDS: '0.3' })
-  assert.match(first.output.hookSpecificOutput.permissionDecisionReason, /still awaiting approval/)
+  assert.match(first.output.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
   ;[...f.decisions.values()][0].status = 'APPROVED'
   const retry = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2') })
   assert.equal(retry.output.hookSpecificOutput.permissionDecision, 'allow')
@@ -231,4 +243,68 @@ test('transcript outcomes ignore other calls and partial lines', async (t) => {
   assert.equal(await transcriptOutcome({ transcript_path: file, tool_use_id: 'exec-b' }), 'FAILURE')
   assert.equal(await transcriptOutcome({ transcript_path: file, tool_use_id: 'exec-c' }), undefined)
   assert.equal(await transcriptOutcome({ tool_use_id: 'exec-a' }), undefined)
+})
+
+test('a held call names where to review it, and a rejection carries the reviewer reason', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const timedOut = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-1') }, { ACTERA_HOLD_SECONDS: '0.3' })
+  assert.match(timedOut.output.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer\. Review it at https:\/\/actera\.test\/ws\/decisions\/[0-9a-f-]{36}\./)
+  const held = runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2', 'echo other') })
+  while (f.decisions.size < 2) await new Promise((resolve) => setTimeout(resolve, 20))
+  Object.assign([...f.decisions.values()][1], { status: 'REJECTED', reason: 'Not during the freeze' })
+  const rejected = await held
+  assert.equal(rejected.output.hookSpecificOutput.permissionDecisionReason, `A reviewer rejected this tool call in Actera (decision ${[...f.decisions.keys()][1]}): Not during the freeze`)
+})
+
+test('status says when no hook has run since connecting', async (t) => {
+  const f = await fixture(t)
+  const before = await runCli(f.home, ['status'])
+  assert.match(JSON.parse(before.stdout).hooksNeedAttention, /Open \/hooks in Codex, trust the Actera hooks/)
+  await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-1') })
+  const after = JSON.parse((await runCli(f.home, ['status'])).stdout)
+  assert.equal(after.hooksNeedAttention, undefined)
+  assert.equal(after.lastHook.event, 'PreToolUse')
+  assert.equal(after.delivery, undefined, 'Codex has no background delivery worker to report')
+})
+
+test('browser pairing and setup codes ask Actera for a Codex connection', async (t) => {
+  const { connectWithSetupCode, pair } = await import('../../src/core/pairing.mjs')
+  const { publicEncrypt, constants } = await import('node:crypto')
+  const home = await mkdtemp(path.join(os.tmpdir(), 'actera-codex-pair-'))
+  t.after(() => rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  const seen = []
+  let publicKey
+  const server = createServer(async (request, response) => {
+    let body = ''
+    for await (const chunk of request) body += chunk
+    const parsed = body ? JSON.parse(body) : undefined
+    seen.push({ path: request.url, body: parsed })
+    response.setHeader('content-type', 'application/json')
+    if (request.url === '/v1/agent-connections') {
+      publicKey = parsed.public_key
+      return response.end(JSON.stringify({ code: 'c'.repeat(43), browser_url: `http://127.0.0.1:${server.address().port}/connect-agent?code=${'c'.repeat(43)}` }))
+    }
+    if (request.url.endsWith('/redeem') && request.url.startsWith('/v1/agent-connections/')) {
+      const ciphertext = publicEncrypt({ key: publicKey, oaepHash: 'sha256', oaepLabel: Buffer.from('actera-agent-connection-v1'), padding: constants.RSA_PKCS1_OAEP_PADDING }, Buffer.from(key)).toString('base64url')
+      return response.end(JSON.stringify({ status: 'approved', ciphertext, agent_id: agentId }))
+    }
+    if (request.url === '/v1/agent-setup-codes/redeem') return response.end(JSON.stringify({ api_key: key, agent_id: agentId }))
+    if (request.url === `/v1/agents/${agentId}/readiness`) return response.end(JSON.stringify({ agent_id: agentId, status: 'ACTIVE', ready: true }))
+    response.statusCode = 404
+    response.end('{}')
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const origin = `http://127.0.0.1:${server.address().port}`
+  const opened = []
+  const paired = await pair({ client: 'codex', home, origin, open: (url) => opened.push(url) })
+  assert.equal(paired.agentId, agentId)
+  assert.equal(seen.find((r) => r.path === '/v1/agent-connections').body.client, 'codex')
+  assert.match(opened[0], /\/connect-agent\?code=/)
+  assert.equal((await loadConfig(home, {})).apiKey, key)
+  const again = await pair({ client: 'codex', home, origin, open: () => assert.fail('A healthy connection must not start a new pairing') })
+  assert.equal(again.alreadyConnected, true)
+  await connectWithSetupCode({ client: 'codex', home, origin, code: '7AHV-F8T0-M349-HPF7' })
+  assert.deepEqual(seen.find((r) => r.path === '/v1/agent-setup-codes/redeem').body, { code: '7AHV-F8T0-M349-HPF7', client: 'codex' })
 })

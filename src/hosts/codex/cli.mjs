@@ -11,6 +11,7 @@ import {
   requestDecision,
 } from '../../core/bridge.mjs'
 import { stopDelivery } from '../../core/delivery.mjs'
+import { connectWithSetupCode, pair } from '../../core/pairing.mjs'
 import { stopScanner } from '../../core/scanner-client.mjs'
 import {
   activityForHook,
@@ -23,6 +24,7 @@ import {
   holdForApproval,
   loadConfig,
   readHookInput,
+  recordHookRun,
   rememberToolDecision,
   status,
 } from './bridge.mjs'
@@ -92,13 +94,39 @@ async function preToolUse(hook, config, home) {
   if (output) process.stdout.write(JSON.stringify(output) + '\n')
 }
 
+async function connect(home) {
+  const setupCode = option('setup-code')
+  const result = setupCode !== undefined
+    ? await connectWithSetupCode({ client: 'codex', home, code: setupCode })
+    : await pair({
+      client: 'codex',
+      home,
+      reconnect: process.argv.includes('--reconnect'),
+      onWaiting: ({ codeHint, browserUrl }) => process.stdout.write(`Confirm code ${codeHint} in the Actera page that just opened.\nIf it did not open, visit: ${browserUrl}\nWaiting for an administrator to approve the connection...\n`),
+    })
+  const { modeName, evaluationFailureName } = (await status(home)).settings
+  process.stdout.write(`${result.alreadyConnected ? 'Actera was already connected' : 'Actera is connected'} to agent ${result.agentId}.\n`)
+  if (process.env.ACTERA_API_ORIGIN) process.stdout.write(`Using the ACTERA_API_ORIGIN override: ${result.baseUrl}\n`)
+  if (result.archivedEvents) process.stdout.write(`Preserved ${result.archivedEvents} undelivered reports from the previous connection in ${result.archivePath}.\n`)
+  process.stdout.write(`Mode: ${modeName}. When Actera cannot evaluate: ${evaluationFailureName}.\n`)
+}
+
 async function main() {
   const command = process.argv[2]
   const home = bridgeHome()
   if (command === 'delivery-stop') { await stopDelivery(home); return }
   if (command === 'scanner-stop') { await stopScanner(path.join(home, 'scanner')); return }
+  if (command === 'connect') { await connect(home); return }
   if (command === 'disconnect') {
-    process.stdout.write(JSON.stringify(await disconnect(home, { discard: process.argv.includes('--discard') })) + '\n')
+    // Deliver here rather than through the core's background worker: Codex
+    // waits for processes its commands leave running.
+    const config = await loadConfig(home, {})
+    if (config && !process.argv.includes('--discard')) {
+      const result = await deliverBatch(config, { home, force: true, timeoutMs: 5000 })
+      if (result.pending)
+        throw new Error(`${result.pending} report(s) could not be delivered${result.error ? ` (${result.error})` : ''}. Run disconnect --discard to delete them.`)
+    }
+    process.stdout.write(JSON.stringify(await disconnect(home, { discard: true })) + '\n')
     return
   }
   if (command === 'setup') {
@@ -144,6 +172,7 @@ async function main() {
   if (command === 'hook') {
     const hook = await readHookInput(process.stdin)
     if (!config) return
+    await recordHookRun(home, hook.hook_event_name).catch(() => {})
     if (hook.hook_event_name === 'PreToolUse') return preToolUse(hook, config, home)
     try {
       await enqueueToolOutcome(hook, config, home)
@@ -153,7 +182,7 @@ async function main() {
     }
     return // Other lifecycle hooks add nothing to Codex's context.
   }
-  throw new Error('Usage: actera-hook.mjs setup|mode|evaluation-failure|status|ready|flush|disconnect|delivery-stop|scanner-stop|hook')
+  throw new Error('Usage: actera-hook.mjs connect [--setup-code CODE | --reconnect] | mode monitoring|enforcing | evaluation-failure block|allow | status | ready | flush | disconnect [--discard] | setup --api-key-stdin | hook')
 }
 
 main().catch((error) => {

@@ -12,7 +12,7 @@ layout settles. The Actera service requires an account.
 
 | Path | Contents |
 | --- | --- |
-| `src/core/` | Connection, queue, delivery worker, input capture and scanner client. No host field names. |
+| `src/core/` | Connection, queue, delivery worker, input capture, scanner client, and pairing (browser approval or a setup code). No host field names. |
 | `src/hosts/claude-code/` | Maps Claude Code hook events to decisions and reports, and Decisions back to `PreToolUse` output. Also the `actera-hook.mjs` command line. |
 | `src/hosts/codex/` | The same for Codex. Codex hooks cannot prompt, so a call that needs approval is held while a reviewer decides in Actera, Slack or email. Outcomes come from the Codex session transcript. |
 | `bin/delivery-worker.mjs` | The background sender the core spawns per bridge directory. |
@@ -39,12 +39,15 @@ Codex state lives under `~/.actera/codex` (or `ACTERA_CODEX_BRIDGE_HOME`).
 
 ## Codex
 
-Codex has no plugin settings, so the Codex command line stores them next to the connection:
+The Codex command line connects without anyone handling a key, and stores the mode next to
+the connection because Codex plugins have no settings. The Codex plugin's skills run these:
 
 ```sh
-node actera-hook.mjs setup --agent-id <agent> --api-key-stdin < key.txt
+node actera-hook.mjs connect                       # browser approval
+node actera-hook.mjs connect --setup-code <code>   # or a setup code from Actera
 node actera-hook.mjs mode enforcing
 node actera-hook.mjs evaluation-failure block
+node actera-hook.mjs status
 ```
 
 `ACTERA_MODE` and `ACTERA_EVALUATION_FAILURE` override the stored values. In Enforcing

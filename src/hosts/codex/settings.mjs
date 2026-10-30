@@ -28,7 +28,7 @@ export async function runtimeSettings(home, env = process.env) {
   const failure = (env.ACTERA_EVALUATION_FAILURE ?? saved.evaluationFailure ?? defaults.evaluationFailure).toLowerCase()
   if (!(mode in modes)) throw new SettingsError('Invalid Actera mode. Use monitoring or enforcing.')
   if (!(failure in evaluationFailures)) throw new SettingsError('Invalid evaluation failure setting. Use block or allow.')
-  return { mode: modes[mode], onEvaluationError: evaluationFailures[failure] }
+  return { mode: modes[mode], onEvaluationError: evaluationFailures[failure], modeName: mode, evaluationFailureName: failure }
 }
 
 export async function saveSetting(home, name, value) {
