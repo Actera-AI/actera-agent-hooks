@@ -1,6 +1,6 @@
 {
   "name": "@actera-ai/agent-hooks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Evaluate coding-agent tool calls against Actera policies and report their outcomes",
   "private": true,
   "license": "Apache-2.0",
@@ -9,6 +9,9 @@
     "./claude-code": "./src/hosts/claude-code/bridge.mjs",
     "./claude-code/cli": "./src/hosts/claude-code/cli.mjs",
     "./claude-code/settings": "./src/hosts/claude-code/settings.mjs",
+    "./codex": "./src/hosts/codex/bridge.mjs",
+    "./codex/cli": "./src/hosts/codex/cli.mjs",
+    "./codex/settings": "./src/hosts/codex/settings.mjs",
     "./core": "./src/core/bridge.mjs",
     "./core/delivery": "./src/core/delivery.mjs",
     "./core/scanner": "./src/core/scanner-client.mjs",

@@ -81,7 +81,8 @@ async function healthy(binary, state) {
   } catch { return false }
 }
 
-async function launch(binary) {
+// publish: false keeps the helper private to the caller, which must shut it down.
+async function launch(binary, { publish = true } = {}) {
   const token = randomBytes(32).toString('hex')
   // Windows locks a process's working directory, so running from the plugin
   // folder would block uninstalling it. The helper reads no files from it.
@@ -105,11 +106,13 @@ async function launch(binary) {
     if (!Number.isInteger(ready.port) || ready.port < 1 || ready.port > 65535 || ready.pid !== child.pid || ready.protocol !== binary.protocol || ready.version !== binary.version) throw new Error('scanner_invalid_output')
     const state = { port: ready.port, pid: ready.pid, token, sha256: binary.sha256 }
     if (!await healthy(binary, state)) throw new Error('scanner_failure')
-    const temporary = `${statePath(binary)}.${randomUUID()}.tmp`
-    try {
-      writeFileSync(temporary, JSON.stringify(state), { flag: 'wx', mode: 0o600 })
-      renameSync(temporary, statePath(binary))
-    } finally { rmSync(temporary, { force: true }) }
+    if (publish) {
+      const temporary = `${statePath(binary)}.${randomUUID()}.tmp`
+      try {
+        writeFileSync(temporary, JSON.stringify(state), { flag: 'wx', mode: 0o600 })
+        renameSync(temporary, statePath(binary))
+      } finally { rmSync(temporary, { force: true }) }
+    }
     child.stdout.destroy()
     child.unref()
     return state
@@ -149,24 +152,41 @@ async function ensureHelper(binary) {
   throw new Error('scanner_failure')
 }
 
-export async function scan(text) {
-  const binary = scannerBinary()
-  const state = await ensureHelper(binary)
-  const findings = await request(state, '/scan', { text })
+function checkedFindings(findings) {
   if (!Array.isArray(findings) || findings.some(f => typeof f.Secret !== 'string' || !f.Secret || typeof f.RuleID !== 'string')) throw new Error('scanner_invalid_output')
   return findings
+}
+
+async function shutdown(state) {
+  await request(state, '/shutdown', {}).catch(() => {})
+  // Let Windows release the executable before test/installation cleanup.
+  for (let i = 0; i < 100; i++) {
+    try { process.kill(state.pid, 0) } catch { break }
+    await delay(10)
+  }
+}
+
+export async function scan(text, cacheRoot) {
+  const binary = scannerBinary({ cacheRoot })
+  const state = await ensureHelper(binary)
+  return checkedFindings(await request(state, '/scan', { text }))
+}
+
+// One scan with a private helper that exits before this returns, for hosts
+// that wait on every process a hook leaves running (Codex on Windows).
+export async function scanOnce(text, cacheRoot) {
+  const binary = scannerBinary({ cacheRoot })
+  const state = await launch(binary, { publish: false })
+  try {
+    return checkedFindings(await request(state, '/scan', { text }))
+  } finally {
+    await shutdown(state)
+  }
 }
 
 export async function stopScanner(cacheRoot) {
   const binary = scannerBinary({ cacheRoot })
   const state = readState(binary)
-  if (await healthy(binary, state)) {
-    await request(state, '/shutdown', {}).catch(() => {})
-    // Let Windows release the executable before test/installation cleanup.
-    for (let i = 0; i < 100; i++) {
-      try { process.kill(state.pid, 0) } catch { break }
-      await delay(10)
-    }
-  }
+  if (await healthy(binary, state)) await shutdown(state)
   rmSync(statePath(binary), { force: true })
 }

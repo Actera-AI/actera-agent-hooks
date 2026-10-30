@@ -350,6 +350,20 @@ export async function claimApproval(home, decisionId) {
   }
 }
 
+// The narrow status of one Decision, as the bound agent may read it.
+export async function decisionStatus(config, decisionId, timeoutMs = 5000) {
+  const response = await fetch(`${config.baseUrl}/v1/decisions/${encodeURIComponent(decisionId)}/status`, {
+    headers: { authorization: `Bearer ${config.apiKey}` },
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) throw new Error(`Actera decision lookup returned HTTP ${response.status}`)
+  const decision = await response.json()
+  if (decision.id !== decisionId || decision.agent_id !== config.agentId)
+    throw new Error('Decision does not belong to this agent')
+  return decision
+}
+
 export async function requestDecision(config, request, timeoutMs = 8000) {
   const decision = await postActera(config, 'decisions', request, timeoutMs)
   if (!decision?.id || typeof decision.status !== 'string') throw new Error('Actera returned an invalid Decision')
@@ -496,8 +510,7 @@ export async function deliverBatch(config, { home = bridgeHome(), limit = Infini
         at: new Date().toISOString(),
         outcome: activity.outcome,
         agentId: activity.agent.id,
-        // Claude Code is the only host so far; the summary reads its context shape.
-        sessionId: activity.context?.claude?.session_id || null,
+        sessionId: activity.context?.claude?.session_id || activity.context?.codex?.session_id || null,
         toolName: activity.details?.tool_name || null,
       })
       await rm(fullPath, { force: true })
