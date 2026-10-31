@@ -1,11 +1,13 @@
-import { scan } from './scanner-client.mjs'
+import { scan, scanOnce } from './scanner-client.mjs'
 export { scannerBinary } from './scanner-client.mjs'
 const sensitiveKey = /authorization|password|passwd|secret|token|api.?key|credential|cookie|private.?key/i
 const maxInputBytes = 512 * 1024
 const pointer = key => String(key).replaceAll('~', '~0').replaceAll('/', '~1')
 
 // The original hook input is never mutated. Both the queue and API use this copy.
-export async function captureInput(input, mode = 'tool-inputs') {
+// scannerRoot keeps a host's scanner cache inside that host's bridge directory;
+// persistentScanner: false scans with a helper that exits before this returns.
+export async function captureInput(input, mode = 'tool-inputs', { scannerRoot, persistentScanner = true } = {}) {
   const metadata = { status: 'complete', scanner: 'gitleaks', scanner_version: '8.30.1', redactions: [] }
   if (mode === 'metadata') return { metadata: { status: 'omitted', reason: 'metadata_only' } }
   if (Buffer.byteLength(JSON.stringify(input)) > maxInputBytes)
@@ -27,7 +29,7 @@ export async function captureInput(input, mode = 'tool-inputs') {
   }
   try {
     const masked = maskFields(input)
-    const findings = strings.length ? await scan(strings.join('\n')) : []
+    const findings = strings.length ? await (persistentScanner ? scan : scanOnce)(strings.join('\n'), scannerRoot) : []
     // Longest first prevents a shorter overlapping match exposing a suffix.
     const secrets = [...new Set(findings.map((f) => f.Secret))].sort((a, b) => b.length - a.length)
     function replace(value, location = '') {

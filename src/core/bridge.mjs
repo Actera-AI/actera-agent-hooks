@@ -350,6 +350,66 @@ export async function claimApproval(home, decisionId) {
   }
 }
 
+// The narrow status of one Decision, as the bound agent may read it.
+export async function decisionStatus(config, decisionId, timeoutMs = 5000) {
+  const response = await fetch(`${config.baseUrl}/v1/decisions/${encodeURIComponent(decisionId)}/status`, {
+    headers: { authorization: `Bearer ${config.apiKey}` },
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (!response.ok) throw new Error(`Actera decision lookup returned HTTP ${response.status}`)
+  const decision = await response.json()
+  if (decision.id !== decisionId || decision.agent_id !== config.agentId)
+    throw new Error('Decision does not belong to this agent')
+  return decision
+}
+
+const alreadyReleased = () => new Error('This approved Decision already released another tool call')
+
+// The linked person approves or rejects a held Decision from the agent host.
+// Actera checks that they may review it; an approval is claimed for this call.
+export async function reviewDecision(config, decisionId, choice, { home = bridgeHome(), idempotencyPrefix, rejectReason, timeoutMs = 8000 }) {
+  if (!/^[0-9a-f-]{36}$/i.test(decisionId) || !['approve', 'reject'].includes(choice))
+    throw new Error('Invalid Decision or review choice')
+  let decision = await decisionStatus(config, decisionId, timeoutMs)
+  if (decision.status === 'PENDING_APPROVAL') {
+    const reviewer = await loadReviewer(config, home)
+    const response = await fetch(`${config.baseUrl}/v1/decisions/${decisionId}/${choice}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${reviewer.token}`,
+        'Actera-Workspace-Id': reviewer.workspaceId,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        idempotency_key: `${idempotencyPrefix}-${choice}:${decisionId}`,
+        ...(choice === 'reject' ? { reason: rejectReason } : {}),
+      }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!response.ok) throw new Error(`Actera ${choice} returned HTTP ${response.status}`)
+    decision = await response.json()
+  }
+  if (
+    decision.id !== decisionId ||
+    decision.agent_id !== config.agentId ||
+    decision.status !== (choice === 'approve' ? 'APPROVED' : 'REJECTED')
+  )
+    throw new Error('Actera returned an unexpected review result')
+  if (choice === 'approve' && !(await claimApproval(home, decisionId))) throw alreadyReleased()
+  return { id: decision.id, status: decision.status }
+}
+
+// A reviewer can resolve a held call in Actera while the host's prompt is
+// open. An approval found here is claimed for this call.
+export async function reviewedElsewhere(config, decisionId, home = bridgeHome(), timeoutMs = 5000) {
+  if (!/^[0-9a-f-]{36}$/i.test(decisionId)) throw new Error('Invalid Decision')
+  const decision = await decisionStatus(config, decisionId, timeoutMs)
+  if (decision.status === 'APPROVED' && !(await claimApproval(home, decisionId))) throw alreadyReleased()
+  return { id: decision.id, status: decision.status, ...(decision.reason ? { reason: decision.reason } : {}) }
+}
+
 export async function requestDecision(config, request, timeoutMs = 8000) {
   const decision = await postActera(config, 'decisions', request, timeoutMs)
   if (!decision?.id || typeof decision.status !== 'string') throw new Error('Actera returned an invalid Decision')
@@ -496,8 +556,7 @@ export async function deliverBatch(config, { home = bridgeHome(), limit = Infini
         at: new Date().toISOString(),
         outcome: activity.outcome,
         agentId: activity.agent.id,
-        // Claude Code is the only host so far; the summary reads its context shape.
-        sessionId: activity.context?.claude?.session_id || null,
+        sessionId: activity.context?.claude?.session_id || activity.context?.codex?.session_id || null,
         toolName: activity.details?.tool_name || null,
       })
       await rm(fullPath, { force: true })

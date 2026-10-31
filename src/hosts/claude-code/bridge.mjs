@@ -2,16 +2,16 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   admittedCall,
   bridgeHome,
-  claimApproval,
   credentialID,
   loadConfig as loadConnection,
-  loadReviewer,
   localStatus,
   previousApproval as previousCoreApproval,
   queueOutcomeReport,
   rememberAdmittedCall,
   rememberPendingApproval as rememberCoreApproval,
   requestDecision,
+  reviewDecision,
+  reviewedElsewhere,
 } from '../../core/bridge.mjs'
 import { ExecutionOutcome } from '../../core/generated/outcomes.mjs'
 import { captureInput } from '../../core/input-capture.mjs'
@@ -294,61 +294,15 @@ export async function previousApproval(hook, config, request, home = bridgeHome(
   return previousCoreApproval(home, approvalFingerprint(hook, config), config, request, timeoutMs)
 }
 
-async function decisionForAgent(config, decisionId, timeoutMs) {
-  const lookup = await fetch(`${config.baseUrl}/v1/decisions/${decisionId}/status`, {
-    headers: { authorization: `Bearer ${config.apiKey}` },
-    redirect: 'error',
-    signal: AbortSignal.timeout(timeoutMs),
-  })
-  if (!lookup.ok) throw new Error(`Actera decision lookup returned HTTP ${lookup.status}`)
-  const decision = await lookup.json()
-  if (decision.id !== decisionId || decision.agent_id !== config.agentId)
-    throw new Error('Decision does not belong to this Claude agent')
-  return decision
-}
-
-const alreadyReleased = () => new Error('This approved Decision already released a Claude tool call')
-
 export async function nativeReviewDecision(config, decisionId, choice, home = bridgeHome(), timeoutMs = 8000) {
-  if (!/^[0-9a-f-]{36}$/i.test(decisionId) || !['approve', 'reject'].includes(choice))
-    throw new Error('Invalid Decision or review choice')
-  let decision = await decisionForAgent(config, decisionId, timeoutMs)
-  if (decision.status === 'PENDING_APPROVAL') {
-    const reviewer = await loadReviewer(config, home)
-    const response = await fetch(`${config.baseUrl}/v1/decisions/${decisionId}/${choice}`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${reviewer.token}`,
-        'Actera-Workspace-Id': reviewer.workspaceId,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        idempotency_key: `claude-native-${choice}:${decisionId}`,
-        ...(choice === 'reject' ? { reason: 'Declined in Claude Code' } : {}),
-      }),
-      redirect: 'error',
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!response.ok) throw new Error(`Actera ${choice} returned HTTP ${response.status}`)
-    decision = await response.json()
-  }
-  if (
-    decision.id !== decisionId ||
-    decision.agent_id !== config.agentId ||
-    decision.status !== (choice === 'approve' ? 'APPROVED' : 'REJECTED')
-  )
-    throw new Error('Actera returned an unexpected review result')
-  if (choice === 'approve' && !(await claimApproval(home, decisionId))) throw alreadyReleased()
-  return { id: decision.id, status: decision.status }
+  return reviewDecision(config, decisionId, choice, { home, idempotencyPrefix: 'claude-native', rejectReason: 'Declined in Claude Code', timeoutMs })
 }
 
 // A reviewer can resolve a held call on the Actera Decision page while
 // Claude's prompt is open. An approval found here is claimed for this call.
 export async function decisionReview(config, decisionId, home = bridgeHome(), timeoutMs = 5000) {
-  if (!/^[0-9a-f-]{36}$/i.test(decisionId)) throw new Error('Invalid Decision')
-  const decision = await decisionForAgent(config, decisionId, timeoutMs)
-  if (decision.status === 'APPROVED' && !(await claimApproval(home, decisionId))) throw alreadyReleased()
-  return { id: decision.id, status: decision.status }
+  const { id, status } = await reviewedElsewhere(config, decisionId, home, timeoutMs)
+  return { id, status }
 }
 
 export async function evaluateHook(hook, config, activity, timeoutMs = 8000) {
