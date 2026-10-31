@@ -1,6 +1,6 @@
 {
   "name": "@actera-ai/agent-hooks",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Evaluate coding-agent tool calls against Actera policies and report their outcomes",
   "private": true,
   "license": "Apache-2.0",

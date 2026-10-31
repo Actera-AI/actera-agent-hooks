@@ -577,6 +577,72 @@ test('a post-tool hook with different arguments cannot attach to the admitted De
   assert.equal(requests.filter((item) => item.path.endsWith('/reports') && item.body.outcome && item.body.decision_id).length, 0)
 })
 
+// Claude's prompt adds the person's reply to the AskUserQuestion input between
+// PreToolUse and PostToolUse. The plugin's own review prompt is one of these.
+const askUserQuestion = {
+  session_id: 'ask-session',
+  tool_use_id: 'ask-1',
+  tool_name: 'AskUserQuestion',
+  tool_input: {
+    questions: [{ question: 'Allow Claude to use bash?', header: 'Actera', options: [{ label: 'Allow once' }, { label: 'Deny' }], multiSelect: false }],
+  },
+}
+
+test('an AskUserQuestion outcome is reported once the person has answered', async (t) => {
+  const { home, requests } = await fixture(t)
+  assert.equal((await runHook(home, { ...askUserQuestion, hook_event_name: 'PreToolUse' })).stdout, '')
+  const answered = {
+    ...askUserQuestion.tool_input,
+    answers: { 'Allow Claude to use bash?': 'Allow once' },
+    annotations: { 'Allow Claude to use bash?': { notes: 'checked the command' } },
+  }
+  const result = await runHook(home, {
+    ...askUserQuestion,
+    hook_event_name: 'PostToolUse',
+    tool_input: answered,
+    tool_response: { questions: answered.questions, answers: answered.answers },
+  })
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  const evaluations = requests.filter((item) => item.path === '/v1/decisions')
+  assert.equal(evaluations.length, 1)
+  assert.equal(evaluations[0].body.action.type, 'claude.tool.AskUserQuestion')
+  const reports = requests.filter((item) => item.path.endsWith('/reports'))
+  assert.deepEqual(reports.map((item) => item.body.outcome), ['SUCCESS'])
+  assert.equal(reports[0].body.decision_id, 'decision-1')
+  assert.ok(!JSON.stringify(reports).includes('checked the command'))
+  const local = await status(home)
+  assert.equal(local.pending, 0)
+  assert.equal(local.lastError, undefined)
+})
+
+test('an answered AskUserQuestion with different questions cannot attach to the admitted Decision', async (t) => {
+  const { home, requests } = await fixture(t)
+  await runHook(home, { ...askUserQuestion, hook_event_name: 'PreToolUse' })
+  const questions = [{ ...askUserQuestion.tool_input.questions[0], question: 'Allow Claude to delete the repository?' }]
+  const result = await runHook(home, {
+    ...askUserQuestion,
+    hook_event_name: 'PostToolUse',
+    tool_input: { questions, answers: { 'Allow Claude to delete the repository?': 'Allow once' } },
+  })
+  assert.notEqual(result.code, 0)
+  assert.match(result.stderr, /does not match the admitted Actera action/)
+  assert.equal(requests.filter((item) => item.path.endsWith('/reports') && item.body.outcome).length, 0)
+})
+
+test('only AskUserQuestion ignores reply fields added after PreToolUse', async (t) => {
+  const { home } = await fixture(t)
+  const tool = { session_id: 'reply-fields', tool_use_id: 'tool-1', tool_name: 'Bash', tool_input: { command: 'echo hi' } }
+  await runHook(home, { ...tool, hook_event_name: 'PreToolUse' })
+  const result = await runHook(home, {
+    ...tool,
+    hook_event_name: 'PostToolUse',
+    tool_input: { ...tool.tool_input, answers: { injected: 'yes' } },
+  })
+  assert.notEqual(result.code, 0)
+  assert.match(result.stderr, /does not match the admitted Actera action/)
+})
+
 test('a pending Actera approval returns promptly with the Decision handle', async (t) => {
   let evaluated
   const { home, requests } = await fixture(t, (endpoint, body) => {
