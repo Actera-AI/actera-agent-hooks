@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- The repository is public. The contract manifest names `Actera-AI/actera-api`, and the Codex
+  MCP server reports the package version instead of a copy of it.
+
 ## 0.3.0
 
 - Review held calls in Codex. `src/hosts/codex/mcp-server.mjs` is an MCP server for the

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { recordEvaluationError } from '../../core/bridge.mjs'
 import { openBrowser } from '../../core/pairing.mjs'
@@ -12,6 +13,7 @@ import { SettingsError } from './settings.mjs'
 // hook, a call on this server can ask the person in Codex (MCP elicitation)
 // while it waits, which is how a held call is reviewed in Codex.
 
+const { version } = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'))
 const HOOK_FIELDS = ['session_id', 'turn_id', 'transcript_path', 'cwd', 'model', 'permission_mode', 'tool_name', 'tool_use_id', 'tool_input']
 const pending = new Map()
 let canAsk = false
@@ -78,7 +80,7 @@ async function handle(message) {
       result: {
         protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
         capabilities: { tools: {} },
-        serverInfo: { name: 'actera', title: 'Actera', version: '0.3.0' },
+        serverInfo: { name: 'actera', title: 'Actera', version },
       },
     })
   }
