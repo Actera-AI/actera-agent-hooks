@@ -5,8 +5,9 @@ report what happened afterwards. The package holds the host-neutral bridge (the
 connection, durable report queue, delivery worker, local secret redaction and
 approval reuse) and one adapter per agent host: Claude Code and Codex.
 
-Licensed under [Apache-2.0](LICENSE). The repository is private while the package
-layout settles. The Actera service requires an account.
+The [Claude Code plugin](https://github.com/Actera-AI/actera-claude-code) and the Codex
+plugin vendor it. Licensed under [Apache-2.0](LICENSE). The Actera service requires an
+account.
 
 ## Layout
 
