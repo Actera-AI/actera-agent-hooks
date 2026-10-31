@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- Claude Code reports `AskUserQuestion` outcomes again. Claude adds the person's `answers` and
+  `annotations` to the tool input after `PreToolUse`, so the result no longer matched the
+  admitted call and status showed a delivery error for every question, including the Claude Code
+  plugin's own review prompt. The call is still bound to its questions; other tools are unchanged.
+
 ## 0.3.1
 
 - The repository is public. The contract manifest names `Actera-AI/actera-api`, and the Codex

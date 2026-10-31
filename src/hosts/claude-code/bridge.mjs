@@ -260,6 +260,17 @@ function canonicalJson(value) {
   return JSON.stringify(value)
 }
 
+// Claude's permission prompt for AskUserQuestion writes the person's choices
+// into the tool input, so PostToolUse carries fields PreToolUse never saw.
+// They are the reply, not the proposed call.
+const PROMPT_REPLY_FIELDS = new Map([['AskUserQuestion', ['answers', 'annotations']]])
+
+function proposedInput(hook) {
+  const reply = PROMPT_REPLY_FIELDS.get(hook.tool_name)
+  if (!reply) return hook.tool_input
+  return Object.fromEntries(Object.entries(hook.tool_input).filter(([key]) => !reply.includes(key)))
+}
+
 // A retry is the same proposed effect only within one Claude session, for the
 // same raw tool and exact arguments. Never persist plaintext tool arguments.
 export function approvalFingerprint(hook, config) {
@@ -280,7 +291,7 @@ export function approvalFingerprint(hook, config) {
         hook.session_id,
         hook.agent_id || '',
         hook.tool_name,
-        hook.tool_input,
+        proposedInput(hook),
       ]),
     )
     .digest('hex')
