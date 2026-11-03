@@ -50,6 +50,32 @@ test('tool input cannot opt itself out with gitleaks allow comments or inherited
   }
 })
 
+test('credential-named assignments are redacted even when Gitleaks skips the value as a placeholder', async () => {
+  // AWS's documented example keys and a sequential token sit on Gitleaks' allowlists.
+  const accessKey = ['AKIA', 'IOSFODNN7', 'EXAMPLE'].join('')
+  const secretKey = ['wJalrXUtnFEMI', 'K7MDENG', 'bPxRfiCYEXAMPLEKEY'].join('/')
+  const placeholder = ['ghp', '1234567890abcdefghijklmnopqrstuvwxyzAB'].join('_')
+  const input = {
+    command: `export AWS_ACCESS_KEY_ID="${accessKey}"; export AWS_SECRET_ACCESS_KEY='${secretKey}'; GITHUB_TOKEN=${placeholder} DB_PASSWORD=hunter2 ./deploy; echo "exit=$?"`,
+    description: 'Deploy with fake credentials',
+  }
+  const { parameters, metadata } = await captureInput(input)
+  assert.equal(metadata.status, 'redacted')
+  assert.equal(
+    parameters.command,
+    `export AWS_ACCESS_KEY_ID="[redacted]"; export AWS_SECRET_ACCESS_KEY='[redacted]'; GITHUB_TOKEN=[redacted] DB_PASSWORD=[redacted] ./deploy; echo "exit=$?"`,
+  )
+  assert.equal(parameters.description, input.description)
+  assert.deepEqual(metadata.redactions, [{ path: '/command', reason: 'sensitive_assignment' }])
+})
+
+test('variable references and ordinary assignments are not mistaken for credentials', async () => {
+  const input = { command: 'curl -H "Authorization: Bearer $GITHUB_TOKEN" -d token=${TOKEN} https://example.com && LIMIT=5 make' }
+  const result = await captureInput(input)
+  assert.equal(result.metadata.status, 'complete')
+  assert.deepEqual(result.parameters, input)
+})
+
 test('ordinary structured inputs are preserved and metadata-only capture is explicit', async () => {
   const input = { command: 'git init', description: 'Initialize repository', count: 2, enabled: true, optional: null }
   assert.deepEqual((await captureInput(input)).parameters, input)

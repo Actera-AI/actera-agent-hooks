@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3
+
+- Values assigned to credential-named variables and headers inside tool input strings are
+  redacted, such as `export GITHUB_TOKEN="..."`, `DB_PASSWORD=...` or
+  `Authorization: Bearer ...`. Gitleaks finds credentials by shape and skips documented
+  placeholders (AWS's `...EXAMPLE` keys) and low-entropy values, so these passed through
+  unredacted. References such as `$GITHUB_TOKEN` are kept. Redactions report
+  `sensitive_assignment`. `access_key` field names are now masked like `api_key`.
+
 ## 0.3.2
 
 - Claude Code reports `AskUserQuestion` outcomes again. Claude adds the person's `answers` and

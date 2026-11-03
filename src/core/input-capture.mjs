@@ -1,6 +1,12 @@
 import { scan, scanOnce } from './scanner-client.mjs'
 export { scannerBinary } from './scanner-client.mjs'
-const sensitiveKey = /authorization|password|passwd|secret|token|api.?key|credential|cookie|private.?key/i
+const sensitiveKey = /authorization|password|passwd|secret|token|api.?key|access.?key|credential|cookie|private.?key/i
+// A value assigned to a credential-named variable or header inside a string, such
+// as `export GITHUB_TOKEN="..."`, `DB_PASSWORD=...` or `Authorization: Bearer ...`.
+// Gitleaks recognizes credentials by shape and skips documented placeholders and
+// low-entropy values; the name alone marks these as secrets.
+const assignment = /([A-Za-z_][\w.-]*)[ \t]*[=:][ \t]*(?:(?:Bearer|Basic|Token)[ \t]+)?("[^"\n]*"|'[^'\n]*'|[^\s"';&|,)]+)/g
+const reference = /^(?:\$\w+|\$\{[^}]*\}|%\w+%|\$\(.*\))$/
 const maxInputBytes = 512 * 1024
 const pointer = key => String(key).replaceAll('~', '~0').replaceAll('/', '~1')
 
@@ -46,6 +52,16 @@ export async function captureInput(input, mode = 'tool-inputs', { scannerRoot, p
       for (const secret of matches) {
         for (let at = value.indexOf(secret); at >= 0; at = value.indexOf(secret, at + 1)) spans.push([at, at + secret.length])
       }
+      let assigned = false
+      for (const match of value.matchAll(assignment)) {
+        const quoted = /^["']/.test(match[2])
+        const secret = quoted ? match[2].slice(1, -1) : match[2]
+        if (!sensitiveKey.test(match[1]) || !secret || reference.test(secret)) continue
+        const end = match.index + match[0].length - (quoted ? 1 : 0)
+        spans.push([end - secret.length, end])
+        assigned = true
+      }
+      if (assigned) metadata.redactions.push({ path: location, reason: 'sensitive_assignment' })
       spans.sort((a, b) => a[0] - b[0])
       const merged = []
       for (const span of spans) {
