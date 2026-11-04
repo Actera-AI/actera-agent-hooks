@@ -588,12 +588,32 @@ export async function disconnect(home = bridgeHome(), { discard = false } = {}) 
     if (result.pending)
       throw new Error(`${result.pending} report(s) could not be delivered${result.error ? ` (${result.error})` : ''}. Run disconnect --discard to delete them.`)
   }
+  const revoke = config ? await revokeConnection(config) : undefined
   await stopDelivery(home)
   // Only a scanner that was extracted here can be running.
   const scanner = path.join(home, 'scanner')
   if (await stat(scanner).catch(() => undefined)) await stopScanner(scanner)
   await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
-  return { disconnected: !!config, home }
+  return { disconnected: !!config, home, ...revoke }
+}
+
+// Ends this connection in Actera too, so it stops showing as connected. A 401
+// means the key no longer works, which is already the result we want. Local
+// state is removed either way; the person can still disconnect in Actera.
+export async function revokeConnection(config, timeoutMs = 5000) {
+  try {
+    const response = await fetch(`${config.baseUrl}/v1/connection/disconnect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${config.apiKey}` },
+      body: '{}',
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (response.ok || response.status === 401) return { revoked: true }
+    return { revoked: false, revokeError: `Actera returned HTTP ${response.status}. Disconnect the agent in Actera.` }
+  } catch (error) {
+    return { revoked: false, revokeError: `Could not reach Actera (${error.message}). Disconnect the agent in Actera.` }
+  }
 }
 
 // Hooks only hand off to the worker; commands that report on delivery wait for it.

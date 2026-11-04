@@ -22,11 +22,15 @@ async function until(check, timeout = 15000, observe) {
 }
 async function fixture(t) {
   const home = await mkdtemp(path.join(tmpdir(), 'actera-delivery-'))
-  const decisions = new Map(), reports = new Map(), attempts = []
-  const service = { available: true, loseAcknowledgement: false }
+  const decisions = new Map(), reports = new Map(), attempts = [], revokes = []
+  const service = { available: true, loseAcknowledgement: false, disconnectStatus: 200 }
   const server = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk
     const input = JSON.parse(body)
+    if (req.url === '/v1/connection/disconnect') {
+      revokes.push(req.headers.authorization)
+      res.writeHead(service.disconnectStatus); res.end(JSON.stringify({ disconnected: true })); return
+    }
     if (req.url === '/v1/decisions') {
       decisions.set(input.idempotency_key, input)
       res.end(JSON.stringify({ id: input.idempotency_key, status: 'MONITORED', effect: 'ALLOW' })); return
@@ -49,7 +53,7 @@ async function fixture(t) {
       child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: 'delivery', tool_use_id: id, tool_name: 'Bash', tool_input: { command: 'echo test' } }))
     })
   }
-  return { home, service, decisions, reports, attempts, hook }
+  return { home, service, decisions, reports, attempts, revokes, hook }
 }
 
 test('twenty concurrent real hook processes drain all outcomes with a single sender', async t => {
@@ -244,8 +248,10 @@ test('disconnect delivers queued reports, stops the sender and removes local sta
   f.service.available = true
   const result = await disconnectCli(f.home)
   assert.equal(result.code, 0, result.stderr)
-  assert.equal(JSON.parse(result.stdout).disconnected, true)
+  assert.deepEqual(JSON.parse(result.stdout), { disconnected: true, home: f.home, revoked: true })
   assert.equal(f.reports.size, 1)
+  // Reports go out before the key that sends them is revoked.
+  assert.deepEqual(f.revokes, ['Bearer actera_' + 'x'.repeat(40)])
   await assert.rejects(readFile(path.join(f.home, 'config.json')), { code: 'ENOENT' })
   await until(async () => !alive(pid))
 })
@@ -258,5 +264,35 @@ test('disconnect --discard removes undeliverable reports', async t => {
   const result = await disconnectCli(f.home, '--discard')
   assert.equal(result.code, 0, result.stderr)
   assert.equal(f.reports.size, 0)
+  assert.equal(JSON.parse(result.stdout).revoked, true)
+  await assert.rejects(readFile(path.join(f.home, 'config.json')), { code: 'ENOENT' })
+})
+
+test('disconnect treats a key Actera already rejects as revoked', async t => {
+  const f = await fixture(t)
+  f.service.disconnectStatus = 401
+  const result = await disconnectCli(f.home)
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).revoked, true)
+  await assert.rejects(readFile(path.join(f.home, 'config.json')), { code: 'ENOENT' })
+})
+
+test('disconnect still removes local state when Actera cannot revoke the connection', async t => {
+  const f = await fixture(t)
+  f.service.disconnectStatus = 503
+  let result = JSON.parse((await disconnectCli(f.home)).stdout)
+  assert.equal(result.revoked, false)
+  assert.match(result.revokeError, /HTTP 503\. Disconnect the agent in Actera\.$/)
+  await assert.rejects(readFile(path.join(f.home, 'config.json')), { code: 'ENOENT' })
+
+  // Unreachable: nothing listens on the port the connection was made with.
+  const closed = createServer()
+  await new Promise(resolve => closed.listen(0, '127.0.0.1', resolve))
+  const port = closed.address().port
+  await new Promise(resolve => closed.close(resolve))
+  await configure({ baseUrl: `http://127.0.0.1:${port}`, agentId: 'delivery-test', apiKey: 'actera_' + 'y'.repeat(40), capture: 'metadata' }, f.home)
+  result = JSON.parse((await disconnectCli(f.home)).stdout)
+  assert.equal(result.revoked, false)
+  assert.match(result.revokeError, /^Could not reach Actera .*Disconnect the agent in Actera\.$/)
   await assert.rejects(readFile(path.join(f.home, 'config.json')), { code: 'ENOENT' })
 })

@@ -18,6 +18,7 @@ const operations = [
   ['post', '/v1/decisions'],
   ['post', '/v1/decisions/{decision_id}/reports'],
   ['post', '/v1/reviewer-links'],
+  ['post', '/v1/connection/disconnect'],
 ]
 for (const [method, path] of operations) assert.ok(contract.paths[path]?.[method], `Missing ${method.toUpperCase()} ${path}`)
 const schemas = contract.components.schemas
@@ -41,4 +42,4 @@ function visit(value) {
   for (const child of Object.values(value)) visit(child)
 }
 visit(contract)
-console.log(`Contract ${manifest.version}: pinned digest and six plugin operations verified`)
+console.log(`Contract ${manifest.version}: pinned digest and seven plugin operations verified`)
