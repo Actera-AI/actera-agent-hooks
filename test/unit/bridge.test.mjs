@@ -471,15 +471,25 @@ test('host failure and interruption are distinct outcomes for arbitrary tools', 
       tool_name: 'mcp__unknown__run_task',
       tool_input: {},
     }
-    await runHook(home, { ...tool, hook_event_name: 'PreToolUse' })
-    await runHook(home, {
+    // An outcome needs an admitted call, so a PreToolUse that could not be
+    // evaluated would leave none. Name the reason if that happens.
+    const admitted = await runHook(home, { ...tool, hook_event_name: 'PreToolUse' })
+    const lastError = await readFile(path.join(home, 'last-error.json'), 'utf8').catch(() => 'none')
+    assert.equal(admitted.code, 0, `PreToolUse failed: ${admitted.stderr}`)
+    assert.equal(admitted.stdout, '', `PreToolUse was not allowed: ${admitted.stdout} (last evaluation error: ${lastError})`)
+    const reported = await runHook(home, {
       ...tool,
       hook_event_name: 'PostToolUseFailure',
       is_interrupt: interrupt,
       error: 'private error details',
     })
+    assert.equal(reported.code, 0, `PostToolUseFailure failed: ${reported.stderr}`)
   }
-  const outcomes = requests.filter((item) => item.path.endsWith('/reports') && item.body.outcome && item.body.decision_id)
+  // Hooks hand reports to the background sender, so wait for it rather than
+  // reading the requests once.
+  const reportedOutcomes = () => requests.filter((item) => item.path.endsWith('/reports') && item.body.outcome && item.body.decision_id)
+  for (let deadline = Date.now() + 15000; reportedOutcomes().length < 2 && Date.now() < deadline;) await delay(50)
+  const outcomes = reportedOutcomes()
   assert.deepEqual(
     outcomes.map((item) => item.body.outcome),
     ['FAILURE', 'CANCELLED'],
