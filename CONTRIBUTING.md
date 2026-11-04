@@ -22,9 +22,28 @@ Keep host field names, idempotency prefixes and output shapes in
 derives a call key (which admitted call a later report belongs to) and an
 approval fingerprint (which retry an approval may release) and passes them in.
 
-Hosts vendor the packed archive. After a change, run `npm pack`, vendor the
-archive into each host with that host's script, and run the host's own tests,
-including its native and live integration suites.
+Hosts vendor a released archive, never a local pack. While developing, pack this
+checkout and vendor it into a host to run the host's own tests, including its
+native and live integration suites, but do not merge a host on a local pack.
+
+## Releasing
+
+1. Bump `version` in `package.json` and add a `## <version>` section to
+   `CHANGELOG.md`. That section becomes the release notes, and CI fails without it.
+2. Merge to `main` and wait for CI on `main` to pass, including `release-ready`.
+3. Tag that exact commit and push the tag:
+
+   ```sh
+   git tag v<version> <commit on main>
+   git push origin v<version>
+   ```
+
+The `release` workflow reuses the passed CI for that commit and publishes
+`actera-ai-agent-hooks-<version>.tgz` and its `.sha256` as a GitHub release. It
+refuses a tag that is not on `main`, a tag that moved, and a version that does not
+match `package.json`. If CI on `main` is still running, the release follows when it
+finishes. Tags are immutable: fix a bad release with a new version. Each host then
+moves to the release in its own pull request, when it needs it.
 
 ## Contract
 
