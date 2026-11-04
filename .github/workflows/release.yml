@@ -1,0 +1,111 @@
+name: release
+# A version tag on main publishes the packed archive that hosts vendor, with its
+# SHA-256, once full CI has passed for that exact commit. Tags are immutable.
+"on":
+  push:
+    tags:
+      - v*
+  workflow_run:
+    workflows:
+      - ci
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag whose exact commit passed full CI on main
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  plan:
+    if:
+      ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name
+      == github.repository && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - id: plan
+        name: Reuse successful CI for the exact tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/release-plan.mjs
+        timeout-minutes: 5
+  release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-${{ matrix.tag }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Verify package version
+        run: node -e "if ('v' + require('./package.json').version !== process.env.RELEASE_TAG) process.exit(1)"
+        timeout-minutes: 5
+      - name: Packed payload
+        run: npm run check:package
+        timeout-minutes: 5
+      - name: Pack the archive and its SHA-256
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release"
+          archive="actera-ai-agent-hooks-${RELEASE_TAG#v}.tgz"
+          cd "$RUNNER_TEMP/release"
+          test -f "$archive"
+          sha256sum "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
+        shell: bash
+        timeout-minutes: 5
+      - name: Release notes from the changelog
+        run: node .github/scripts/release-notes.mjs "${RELEASE_TAG#v}" > "$RUNNER_TEMP/notes.md"
+        shell: bash
+        timeout-minutes: 5
+      - name: Reject a moved or already published release tag
+        id: ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/release-plan.mjs --check-tag
+        timeout-minutes: 5
+      - name: Record release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$RUNNER_TEMP/release/actera-ai-agent-hooks-${RELEASE_TAG#v}.tgz"
+          gh release create "$RELEASE_TAG" "$archive" "$archive.sha256" --verify-tag --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/notes.md"
+        shell: bash
+        if: ${{ steps.ready.outputs.publish == 'true' }}
+        timeout-minutes: 5
+    if: ${{ needs.plan.outputs.publish == 'true' }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ matrix.tag }}
+      RELEASE_SHA: ${{ matrix.sha }}
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha || github.event.inputs.tag || github.sha }}
+  cancel-in-progress: false
