@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3
+
+- A held Codex call no longer waits silently when Codex cannot show the review prompt. Under
+  approval policy `never` (Full access in the Codex app) and in `codex exec`, Codex declines
+  the prompt without showing it, so the hook used to hold for up to 540 seconds while Codex
+  showed only "thinking". Now a declined or dismissed prompt, or a Codex without elicitation
+  support, ends the hold at once and denies the call with a reason that asks the agent to get
+  it approved in Actera and retry. The retry reuses the held Decision. Choosing "Wait for a
+  reviewer" still holds as before.
+
 ## 0.3.2
 
 - Claude Code reports `AskUserQuestion` outcomes again. Claude adds the person's `answers` and

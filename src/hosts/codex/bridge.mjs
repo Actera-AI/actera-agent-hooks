@@ -254,6 +254,8 @@ export function codexToolDecision(decision) {
   // Codex appends ". Command: ..." to the reason, so it carries no final period.
   const deny = (reason) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason.replace(/\.$/, '') } })
   const review = decision.review_url ? ` Review it at ${decision.review_url}.` : ''
+  if (decision.status === 'PENDING_APPROVAL' && decision.unansweredInCodex)
+    return deny(`Actera is holding this tool call for a reviewer (decision ${decision.id}), and it was not approved in Codex. Ask the person to approve it in Actera${decision.review_url ? ` at ${decision.review_url}` : ''}. Once it is approved, retry this exact tool call; the approval releases one matching retry. Codex cannot show Actera's prompt when approvals are off (Full access) or in codex exec.`)
   if (decision.status === 'PENDING_APPROVAL')
     return deny(`Actera decision ${decision.id} is still waiting for a reviewer.${review} Once it is approved, retry this exact tool call; the approval releases one matching retry.`)
   if (decision.status === 'ALREADY_RELEASED')

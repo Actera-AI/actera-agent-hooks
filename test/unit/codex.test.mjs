@@ -417,18 +417,37 @@ test('a review in Actera closes the open Codex prompt and decides the call', asy
   assert.equal(codex.cancelled.length, 1, 'The prompt was withdrawn')
 })
 
-test('no answer in Codex keeps the call held for a reviewer elsewhere', async (t) => {
+test('a prompt Codex cannot show ends the hold at once and a retry runs once approved', async (t) => {
   const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
   await saveSetting(f.home, 'mode', 'enforcing')
   await linkReviewer(f)
-  // codex exec and approval policy "never" decline every prompt.
-  const declined = await mcpSession(t, f.home, { answer: () => ({ action: 'decline' }), env: { ACTERA_HOLD_SECONDS: '0.4' } }).check(call('exec-1'))
-  assert.match(declined.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
-  const noElicitation = mcpSession(t, f.home, { answer: () => choice('approve'), elicitation: null, env: { ACTERA_HOLD_SECONDS: '0.4' } })
-  const unasked = await noElicitation.check(call('exec-2', 'echo other'))
-  assert.match(unasked.hookSpecificOutput.permissionDecisionReason, /still waiting for a reviewer/)
+  // Approval policy "never" and codex exec decline every prompt without showing it.
+  // The default 540 second hold must not apply.
+  const started = Date.now()
+  const declined = await mcpSession(t, f.home, { answer: () => ({ action: 'decline' }) }).check(call('exec-1'))
+  assert.ok(Date.now() - started < 5000, 'The hold ended without waiting for a reviewer')
+  const id = [...f.decisions.keys()][0]
+  assert.equal(declined.hookSpecificOutput.permissionDecision, 'deny')
+  assert.equal(declined.hookSpecificOutput.permissionDecisionReason, `Actera is holding this tool call for a reviewer (decision ${id}), and it was not approved in Codex. Ask the person to approve it in Actera. Once it is approved, retry this exact tool call; the approval releases one matching retry. Codex cannot show Actera's prompt when approvals are off (Full access) or in codex exec`)
+  // A Codex that offers no elicitation at all is treated the same way, and the
+  // identical retry reuses the held Decision rather than creating another.
+  const noElicitation = mcpSession(t, f.home, { answer: () => choice('approve'), elicitation: null })
+  const unasked = await noElicitation.check(call('exec-2'))
+  assert.match(unasked.hookSpecificOutput.permissionDecisionReason, /not approved in Codex/)
   assert.equal(noElicitation.prompts.length, 0)
+  assert.equal(f.decisions.size, 1)
   assert.equal(f.requests.filter((r) => /\/(approve|reject)$/.test(r.path)).length, 0)
+  f.decisions.get(id).status = 'APPROVED'
+  assert.deepEqual(await mcpSession(t, f.home, { answer: () => ({ action: 'decline' }) }).check(call('exec-3')), {}, 'The approval releases the retry')
+})
+
+test('dismissing the link prompt ends the hold instead of waiting silently', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const codex = mcpSession(t, f.home, { answer: () => ({ action: 'cancel' }) })
+  const output = await codex.check(call('exec-1'))
+  assert.match(codex.prompts[0].message, /Link Codex to your Actera account/)
+  assert.match(output.hookSpecificOutput.permissionDecisionReason, /not approved in Codex/)
 })
 
 test('an unlinked person is offered linking before reviewing in Codex', async (t) => {

@@ -5,7 +5,8 @@ import { holdForApproval } from './bridge.mjs'
 // Actera account can approve or deny it in a Codex prompt (an MCP elicitation)
 // instead of in Actera. Actera still checks that they may review it. The hold
 // keeps polling meanwhile, so a review in Actera, Slack or email still decides
-// it and closes the prompt. No answer in Codex leaves the call held.
+// it and closes the prompt. A prompt Codex cannot show, or one the person
+// dismisses, ends the hold at once with the review link.
 
 function readableName(value) {
   return String(value || '')
@@ -80,22 +81,25 @@ async function linked(config, home) {
   try { return (await reviewerLinkStatus(config, home)).linked } catch { return false }
 }
 
-// Returns 'approve' or 'reject', or undefined when the person did not answer
-// here (Codex declines prompts it cannot show, such as in codex exec).
+// Returns 'approve', 'reject' or 'wait' (the person chose to wait for a
+// reviewer elsewhere), or undefined when no one answered here. Codex declines
+// at once a prompt it cannot show (approval policy "never", codex exec), and a
+// person who dismisses the prompt declines it too.
 async function askInCodex(config, home, hook, { ask, openBrowser, signal }) {
   if (!(await linked(config, home))) {
     const wanted = await choose(ask, 'Actera is holding this tool call for a reviewer. Link Codex to your Actera account to review it here, or wait for a reviewer in Actera.', [
       ['link', 'Link my Actera account'],
       ['wait', 'Wait for a reviewer'],
     ], signal)
-    if (wanted !== 'link' || signal.aborted) return undefined
+    if (wanted !== 'link' || signal.aborted) return wanted
     const link = await startReviewerLink(config, home)
     openBrowser(link.browserUrl)
     const done = await choose(ask, `Finish linking in the Actera page that just opened, then continue here. If it did not open, visit ${link.browserUrl}`, [
       ['continue', 'Continue'],
       ['wait', 'Wait for a reviewer'],
     ], signal)
-    if (done !== 'continue' || signal.aborted || !(await linked(config, home))) return undefined
+    if (done !== 'continue' || signal.aborted) return done
+    if (!(await linked(config, home))) return undefined
   }
   return choose(ask, reviewQuestion(hook.tool_name, hook.tool_input), [
     ['approve', 'Allow once'],
@@ -109,10 +113,13 @@ export async function holdWithReview(config, decision, home, hook, { holdMs, pol
   const asked = askInCodex(config, home, hook, { ask, openBrowser, signal: controller.signal }).catch(() => undefined)
   const first = await Promise.race([
     held.then((current) => ({ current })),
-    asked.then((choice) => (choice ? { choice } : held.then((current) => ({ current })))),
+    asked.then((choice) => (choice === 'wait' ? held.then((current) => ({ current })) : { choice })),
   ])
   controller.abort() // Closes an open prompt or stops the hold.
   if (first.current) return first.current
+  // Unanswered here: end the hold now so the agent can say where to review it,
+  // instead of waiting silently. A retry reuses this Decision.
+  if (!first.choice) return { ...decision, unansweredInCodex: true }
   try {
     const reviewed = await reviewDecision(config, decision.id, first.choice, { home, idempotencyPrefix: 'codex-native', rejectReason: 'Declined in Codex' })
     return { ...decision, ...reviewed, reviewedIn: 'codex' }
