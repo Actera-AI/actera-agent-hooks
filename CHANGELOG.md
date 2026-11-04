@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Disconnecting also ends the connection in Actera. After queued reports are delivered, the
+  bridge calls `POST /v1/connection/disconnect` (API contract 0.8.0) with its key, so the
+  agent's connection shows Disconnected and the key stops working. A 401 means the key was
+  already revoked. If Actera cannot be reached or refuses, local state is still removed, and the
+  result has `revoked: false` with a `revokeError` asking the person to disconnect the agent in
+  Actera. Needs an Actera API that serves the endpoint.
+
 ## 0.3.3
 
 - A held Codex call no longer waits silently when Codex cannot show the review prompt. Under

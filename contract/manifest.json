@@ -1,7 +1,7 @@
 {
-  "version": "0.7.0",
+  "version": "0.8.0",
   "schema": "actera.openapi.json",
-  "sha256": "242d15f20f3bd1b1105817cd79c32850dc9bd435ca319fb22b68fbcf3a7e63e4",
+  "sha256": "808168cbb0bdf08163582d96e25d49c6907e16fb9edf2b5ceb556f3be2121b38",
   "repository": "Actera-AI/actera-api",
-  "tag": "v0.7.0"
+  "tag": "v0.8.0"
 }

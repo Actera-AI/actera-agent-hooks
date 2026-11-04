@@ -859,6 +859,128 @@
         ]
       }
     },
+    "/v1/connection/disconnect": {
+      "post": {
+        "summary": "Disconnect this connection",
+        "description": "Ends the machine key's own connection and revokes its keys. The key stops working once this returns.",
+        "operationId": "AgentAccessService_DisconnectConnection",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1DisconnectConnectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An operation-level permission check denied the actor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with current authoritative state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is too large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An internal error occurred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A required service is temporarily unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "The request failed. Inspect the machine-readable code and optional field errors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/v1Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/v1DisconnectConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "tags": [
+          "Agent Access"
+        ]
+      }
+    },
     "/v1/decisions": {
       "post": {
         "summary": "Evaluate an agent action",
@@ -1549,7 +1671,7 @@
         "properties": {
           "mode": {
             "type": "string",
-            "description": "MONITORING records policy results without admission or approvals. Default: ENFORCING."
+            "description": "Both modes evaluate and reserve in-flight capacity identically. MONITORING skips approvals and managed execution; the host chooses enforcement. Default: ENFORCING."
           },
           "idempotency_key": {
             "type": "string"
@@ -1974,6 +2096,18 @@
           "details"
         ]
       },
+      "v1DisconnectConnectionRequest": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "v1DisconnectConnectionResponse": {
+        "type": "object",
+        "properties": {
+          "disconnected": {
+            "type": "boolean"
+          }
+        }
+      },
       "v1Effect": {
         "type": "string",
         "enum": [
@@ -2106,6 +2240,14 @@
           },
           "status": {
             "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "The reviewer's reason once the Decision is approved or rejected."
+          },
+          "review_url": {
+            "type": "string",
+            "description": "Where a workspace member reviews this Decision in the browser."
           }
         }
       },
