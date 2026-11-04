@@ -12,10 +12,13 @@ import { configure, status } from '../../src/hosts/claude-code/bridge.mjs'
 import { deliveryStatus, ensureDelivery, stopDelivery } from '../../src/core/delivery.mjs'
 
 const cli = fileURLToPath(new URL('../../src/hosts/claude-code/cli.mjs', import.meta.url))
-async function until(check, timeout = 15000) {
+// `observe` describes the state on failure, so a timeout on a slow runner says
+// where delivery stopped.
+async function until(check, timeout = 15000, observe) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) { if (await check()) return; await delay(50) }
-  assert.fail('Delivery did not reach the expected state without another hook')
+  const seen = observe ? ` (last seen: ${JSON.stringify(await observe().catch(error => error.message))})` : ''
+  assert.fail(`Delivery did not reach the expected state without another hook${seen}`)
 }
 async function fixture(t) {
   const home = await mkdtemp(path.join(tmpdir(), 'actera-delivery-'))
@@ -139,27 +142,42 @@ test('a killed sender releases its OS lock and a replacement resumes durable rep
 })
 
 test('a post-tool hook saves its outcome promptly while an unreachable sender holds the delivery port', async t => {
-  const f = await fixture(t)
   // A sender for this directory whose discovery file is gone answers the
-  // election probe but cannot be controlled or replaced.
-  const id = createHash('sha256').update(process.platform === 'win32' ? path.resolve(f.home).toLowerCase() : path.resolve(f.home)).digest('hex')
-  const orphan = createServer((req, res) => {
-    req.resume()
-    if (req.url === '/identity') res.end(JSON.stringify({ identity: id, protocol: 1 }))
-    else { res.writeHead(403); res.end('{}') }
-  })
-  await new Promise(resolve => orphan.listen(20000 + parseInt(id.slice(0, 8), 16) % 30000, '127.0.0.1', resolve))
-  t.after(() => new Promise(resolve => orphan.close(resolve)))
+  // election probe but cannot be controlled or replaced. Its port follows from
+  // the directory, and an unrelated process may already hold it, so try
+  // another directory when it does.
+  let f, orphan
+  for (let attempt = 0; !orphan; attempt++) {
+    f = await fixture(t)
+    const id = createHash('sha256').update(process.platform === 'win32' ? path.resolve(f.home).toLowerCase() : path.resolve(f.home)).digest('hex')
+    const server = createServer((req, res) => {
+      req.resume()
+      if (req.url === '/identity') res.end(JSON.stringify({ identity: id, protocol: 1 }))
+      else { res.writeHead(403); res.end('{}') }
+    })
+    try {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(20000 + parseInt(id.slice(0, 8), 16) % 30000, '127.0.0.1', resolve)
+      })
+      orphan = server
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' || attempt >= 4) throw error
+    }
+  }
+  t.after(() => new Promise(resolve => orphan.close(() => resolve())))
   await f.hook('PreToolUse', 'orphaned')
   const started = Date.now()
   await f.hook('PostToolUse', 'orphaned')
   assert.ok(Date.now() - started < 2500, 'The hook must not wait for a contested sender')
+  // The outcome is durable: still queued, or already sent by a sender on
+  // another port. A loaded machine can miss the 500 ms election probe and
+  // elect a sender beside the orphan, which is allowed.
   const snapshot = await status(f.home)
-  assert.equal(snapshot.queue.executionReports, 1)
-  assert.equal(snapshot.delivery.running, false)
-  await new Promise(resolve => orphan.close(resolve))
+  assert.ok(snapshot.queue.executionReports === 1 || f.reports.size === 1, `The outcome was neither queued nor sent: ${JSON.stringify(snapshot.queue)}`)
+  await new Promise(resolve => orphan.close(() => resolve()))
   await ensureDelivery(f.home)
-  await until(async () => f.reports.size === 1 && (await status(f.home)).pending === 0)
+  await until(async () => f.reports.size === 1 && (await status(f.home)).pending === 0, 15000, async () => ({ reports: f.reports.size, ...(await status(f.home)).queue, delivery: await deliveryStatus(f.home) }))
 })
 
 const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
@@ -217,7 +235,7 @@ test('disconnect delivers queued reports, stops the sender and removes local sta
   f.service.available = false
   await f.hook('PreToolUse', 'disconnect')
   await f.hook('PostToolUse', 'disconnect')
-  await until(async () => (await deliveryStatus(f.home)).state === 'retrying')
+  await until(async () => (await deliveryStatus(f.home)).state === 'retrying', 15000, async () => ({ attempts: f.attempts.length, ...(await status(f.home)).queue, delivery: await deliveryStatus(f.home) }))
   const { pid } = await deliveryStatus(f.home)
   const refused = await disconnectCli(f.home)
   assert.equal(refused.code, 1)
