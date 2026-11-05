@@ -26,7 +26,9 @@ async function fixture(t) {
   const service = { available: true, loseAcknowledgement: false, disconnectStatus: 200 }
   const server = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk
-    const input = JSON.parse(body)
+    // A sender stopped mid-request leaves a truncated body; answer it like the API would.
+    let input
+    try { input = JSON.parse(body) } catch { res.writeHead(400); res.end('{}'); return }
     if (req.url === '/v1/connection/disconnect') {
       revokes.push(req.headers.authorization)
       res.writeHead(service.disconnectStatus); res.end(JSON.stringify({ disconnected: true })); return
