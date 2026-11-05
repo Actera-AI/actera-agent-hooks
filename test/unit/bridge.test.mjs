@@ -287,7 +287,10 @@ test('a full queue does not raise non-tool hook errors in Claude', async (t) => 
   assert.equal(result.stdout, '')
   assert.equal(result.stderr, '')
   assert.equal((await status(home)).pending, 128)
-  assert.match((await status(home)).delivery.lastError.message, /Legacy hook queue/)
+  // The background sender records the error shortly after the hook returns.
+  const deadline = Date.now() + 15000
+  while (!(await status(home)).delivery.lastError && Date.now() < deadline) await delay(50)
+  assert.match((await status(home)).delivery.lastError?.message ?? 'no error recorded', /Legacy hook queue/)
 })
 
 test('a full queue resumes delivery when the API is reachable again', async (t) => {
