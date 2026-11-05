@@ -92,6 +92,9 @@ test("release CLI handles pending CI, completion, annotated tags, reruns, moved 
   git("tag", "-a", "v1.0.1", "-m", "annotated");
   let current = { ...run, head_sha: commit, run_attempt: 2 };
   let jobs = proof;
+  // A completed run whose last job result GitHub has not recorded yet.
+  const unsettled = [...proof, { name: "package", conclusion: null }];
+  let settling = 0;
   let published = false;
   let tagSha = commit;
   const requests = [];
@@ -104,7 +107,7 @@ test("release CLI handles pending CI, completion, annotated tags, reruns, moved 
     } else if (req.url.includes("/workflows/ci.yml/runs")) {
       res.end(JSON.stringify({ workflow_runs: [current] }));
     } else if (req.url.includes("/attempts/2/jobs")) {
-      res.end(JSON.stringify({ jobs }));
+      res.end(JSON.stringify({ jobs: settling-- > 0 ? unsettled : jobs }));
     } else if (req.url.includes("/commits/")) {
       res.end(JSON.stringify({ sha: tagSha }));
     } else {
@@ -134,6 +137,7 @@ test("release CLI handles pending CI, completion, annotated tags, reruns, moved 
           GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
           RELEASE_TAG: "v1.0.0",
           RELEASE_SHA: commit,
+          RELEASE_PLAN_SETTLE_MS: "10",
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -161,6 +165,20 @@ test("release CLI handles pending CI, completion, annotated tags, reruns, moved 
   assert.match(result.output, /v1.0.0/);
   assert.match(result.output, /v1.0.1/);
   assert.ok(requests.some((path) => path.includes("/attempts/2/jobs")));
+  // Job results that arrive after the run completes are waited for.
+  settling = 2;
+  result = await cli("workflow_run", { workflow_run: current });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.output, /publish=true/);
+  // A result that never arrives still refuses the release, and says which job.
+  settling = Infinity;
+  result = await cli("workflow_run", { workflow_run: current });
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    /incomplete or failed job: package \(no result\)/,
+  );
+  settling = 0;
   jobs = [{ name: "release-ready", conclusion: "skipped" }];
   assert.notEqual((await cli("push", { ref: "refs/tags/v1.0.0" })).status, 0);
   jobs = proof;
