@@ -32,8 +32,13 @@ export function readiness(runs, jobs, sha, repo) {
     throw new Error(
       "Full CI coverage is required: docs-only, skipped, or legacy CI is not release evidence. Run ci manually on main.",
     );
-  if (jobs.some((job) => !["success", "skipped"].includes(job.conclusion)))
-    throw new Error("CI contains an incomplete or failed job.");
+  const blocking = jobs.filter(
+    (job) => !["success", "skipped"].includes(job.conclusion),
+  );
+  if (blocking.length)
+    throw new Error(
+      `CI contains an incomplete or failed job: ${blocking.map((job) => `${job.name} (${job.conclusion ?? "no result"})`).join(", ")}.`,
+    );
   return "ready";
 }
 
@@ -65,6 +70,18 @@ async function checkTag(repo, tag, sha) {
     throw new Error(
       "Release tag moved after CI validation; refusing to publish.",
     );
+}
+
+// Only the latest attempt: old successful attempts must not authorize a rerun.
+async function attemptJobs(repo, run) {
+  const jobs = [];
+  for (let page = 1; ; page++) {
+    const result = await api(
+      `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100&page=${page}`,
+    );
+    jobs.push(...result.jobs);
+    if (result.jobs.length < 100) return jobs;
+  }
 }
 
 async function main() {
@@ -128,15 +145,15 @@ async function main() {
     const run = runs
       .filter((item) => trustedRun(item, sha, repo))
       .sort((a, b) => b.id - a.id)[0];
-    const jobs = [];
+    let jobs = [];
     if (run?.status === "completed" && run.conclusion === "success") {
-      for (let page = 1; ; page++) {
-        // Only the latest attempt: old successful attempts must not authorize a rerun.
-        const result = await api(
-          `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100&page=${page}`,
-        );
-        jobs.push(...result.jobs);
-        if (result.jobs.length < 100) break;
+      // GitHub can mark a run complete a few seconds before every job's result
+      // is recorded. Wait up to a minute for them instead of refusing the release.
+      const settleMs = Number(process.env.RELEASE_PLAN_SETTLE_MS ?? 10000);
+      for (let attempt = 1; ; attempt++) {
+        jobs = await attemptJobs(repo, run);
+        if (jobs.every((job) => job.conclusion) || attempt === 6) break;
+        await new Promise((resolve) => setTimeout(resolve, settleMs));
       }
     }
     if (readiness(runs, jobs, sha, repo) === "pending") {
