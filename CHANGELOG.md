@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - A 429 from Actera now honours `Retry-After`, capped at one hour so a plan change is noticed.
   Before, the delivery worker retried every 30 seconds until the limit reset.
