@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2
+
+- Claude Code: reviewing a held call no longer claims the approval. The plugin's mod runs the
+  PreToolUse hook again, and that run claims it and releases the call, so an approval still
+  releases one call. A plugin that vendors this version needs a mod that does the same.
+- Claude Code: hooks save the plugin's options, so `status` reports them without taking them as
+  arguments.
+
 ## 0.4.1
 
 - A 429 from Actera now honours `Retry-After`, capped at one hour so a plan change is noticed.

@@ -1,3 +1,6 @@
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+
 // The plugin manifest declares these options as `userConfig`; the plugin's own
 // tests check that its manifest matches this schema exactly.
 export const userConfig = Object.freeze({
@@ -19,12 +22,32 @@ export const userConfig = Object.freeze({
 
 export class SettingsError extends Error {}
 
+const envName = key => `CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`
+const savedPath = home => path.join(home, 'plugin-settings.json')
+const pick = env => Object.fromEntries(Object.keys(userConfig).map(envName).filter(name => env[name] !== undefined).map(name => [name, env[name]]))
+
+// Claude hands its options to hooks only, so a skill's command cannot see them.
+// Hooks save them here for `status`, whose own tool call runs a hook first.
+export async function saveSettings(home, env = process.env) {
+  const text = JSON.stringify(pick(env))
+  if (text === '{}' || text === await readFile(savedPath(home), 'utf8').catch(() => undefined)) return
+  await mkdir(home, { recursive: true, mode: 0o700 })
+  const temporary = `${savedPath(home)}.${process.pid}.tmp`
+  await writeFile(temporary, text, { mode: 0o600 })
+  await rename(temporary, savedPath(home))
+}
+
+export async function withSavedSettings(home, env = process.env) {
+  const saved = await readFile(savedPath(home), 'utf8').then(JSON.parse).catch(() => ({}))
+  return { ...pick(saved), ...env }
+}
+
 // Claude owns persistence and precedence. Hooks receive the effective options;
 // standalone callers can supply the same environment without another config store.
 export function runtimeSettings(env = process.env) {
   const values = {}
   for (const [key, schema] of Object.entries(userConfig)) {
-    const value = env[`CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}`] ?? schema.default
+    const value = env[envName(key)] ?? schema.default
     if (!schema.options.includes(value))
       throw new SettingsError(`Invalid ${schema.title}. Choose a supported value in Claude /config.`)
     values[key] = value

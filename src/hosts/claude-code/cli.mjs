@@ -2,7 +2,7 @@
 import { stopDelivery } from '../../core/delivery.mjs'
 import { spawn } from 'node:child_process'
 import { stopScanner } from '../../core/scanner-client.mjs'
-import { SettingsError } from './settings.mjs'
+import { saveSettings, SettingsError } from './settings.mjs'
 import {
   agentReadiness,
   activityForHook,
@@ -179,6 +179,7 @@ async function main() {
   }
   if (command === 'hook') {
     const hook = await readHookInput(process.stdin)
+    await saveSettings(bridgeHome()).catch(error => recordEvaluationError(error).catch(() => {}))
     if (!config) {
       return
     }

@@ -15,7 +15,7 @@ import {
 } from '../../core/bridge.mjs'
 import { ExecutionOutcome } from '../../core/generated/outcomes.mjs'
 import { captureInput } from '../../core/input-capture.mjs'
-import { runtimeSettings } from './settings.mjs'
+import { runtimeSettings, withSavedSettings } from './settings.mjs'
 
 // Claude Code hook adapter: maps Claude's hook events onto Actera decisions,
 // call identities and execution reports, and Decisions back onto Claude's
@@ -306,14 +306,16 @@ export async function previousApproval(hook, config, request, home = bridgeHome(
   return previousCoreApproval(home, approvalFingerprint(hook, config), config, request, timeoutMs)
 }
 
+// The plugin's mod reviews a held call, then runs its PreToolUse hook again.
+// That run claims the approval and releases the call, so reviewing claims nothing.
 export async function nativeReviewDecision(config, decisionId, choice, home = bridgeHome(), timeoutMs = 8000) {
-  return reviewDecision(config, decisionId, choice, { home, idempotencyPrefix: 'claude-native', rejectReason: 'Declined in Claude Code', timeoutMs })
+  return reviewDecision(config, decisionId, choice, { home, idempotencyPrefix: 'claude-native', rejectReason: 'Declined in Claude Code', timeoutMs, claim: false })
 }
 
 // A reviewer can resolve a held call on the Actera Decision page while
-// Claude's prompt is open. An approval found here is claimed for this call.
+// Claude's prompt is open.
 export async function decisionReview(config, decisionId, home = bridgeHome(), timeoutMs = 5000) {
-  const { id, status } = await reviewedElsewhere(config, decisionId, home, timeoutMs)
+  const { id, status } = await reviewedElsewhere(config, decisionId, home, timeoutMs, { claim: false })
   return { id, status }
 }
 
@@ -331,6 +333,9 @@ export function claudeToolDecision(decision) {
         hookEventName: 'PreToolUse',
         permissionDecision: 'allow',
         permissionDecisionReason: `Actera decision ${decision.id} approved`,
+        // Claude sees only the tool's result otherwise, and would describe a held
+        // and approved call as one that ran unchecked.
+        additionalContext: `Actera held this tool call for approval, then released it. Actera decision ${decision.id} approved.`,
       },
     }
   if (decision.status === 'PENDING_APPROVAL')
@@ -360,7 +365,8 @@ export function claudeEvaluationFailure(error) {
   }
 }
 
-export async function status(home = bridgeHome(), env = process.env) {
+export async function status(home = bridgeHome(), callerEnv = process.env) {
+  const env = await withSavedSettings(home, callerEnv)
   const config = await loadConfig(home, env)
   return {
     configured: !!config,
