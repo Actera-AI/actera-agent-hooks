@@ -9,6 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import test, { after } from 'node:test'
+import { claimApproval } from '../../src/core/bridge.mjs'
 import { scannerBinary, stopScanner } from '../../src/core/scanner-client.mjs'
 import {
   activityForHook,
@@ -124,6 +125,7 @@ test('a linked reviewer resolves the existing Decision and releases it only once
   assert.equal(approval.headers.authorization, `Bearer ${reviewerToken}`)
   assert.equal(approval.headers['actera-workspace-id'], workspaceId)
   assert.equal(approval.body.idempotency_key, `claude-native-approve:${decisionId}`)
+  assert.equal(await claimApproval(home, decisionId), true, 'the review leaves the claim to the hook run that releases the call')
   await assert.rejects(nativeReviewDecision(config, decisionId, 'approve', home), /already released/)
   assert.equal(requests.filter((r) => r.path === `/v1/decisions/${decisionId}/approve`).length, 1)
   assert.equal(requests.filter((r) => r.path === `/v1/decisions/${decisionId}`).length, 0)
@@ -154,6 +156,7 @@ test('a Decision approved in Actera releases one held call and a pending one sta
   assert.deepEqual(await decisionReview(config, decisionId, home), { id: decisionId, status: 'PENDING_APPROVAL' })
   status = 'APPROVED'
   assert.deepEqual(await decisionReview(config, decisionId, home), { id: decisionId, status: 'APPROVED' })
+  assert.equal(await claimApproval(home, decisionId), true, 'looking leaves the claim to the hook run that releases the call')
   await assert.rejects(decisionReview(config, decisionId, home), /already released/)
   await assert.rejects(nativeReviewDecision(config, decisionId, 'approve', home), /already released/)
   agent = 'another-agent'
@@ -737,6 +740,65 @@ test('an approval after the hook returns authorizes one exact retry without a ne
   assert.match(secondSend.stdout, /approval-2 is awaiting approval/)
   assert.equal(evaluations, 2)
   assert.equal(requests.filter((item) => item.path === '/v1/decisions').length, 2)
+})
+
+test('a held call reviewed while it waits is released once when its hook runs again', async (t) => {
+  const decisionId = '6f4a2c1e-0b7d-4e3a-9c55-1d2e3f4a5b6c'
+  let approvalStatus = 'PENDING_APPROVAL'
+  let originalRequest
+  let evaluations = 0
+  const { home } = await fixture(t, (endpoint, body) => {
+    if (endpoint === '/v1/decisions') {
+      evaluations++
+      if (evaluations === 1) originalRequest = body
+      return { body: { id: evaluations === 1 ? decisionId : 'next-decision', status: 'PENDING_APPROVAL' } }
+    }
+    if (endpoint === `/v1/decisions/${decisionId}/status`)
+      return {
+        body: {
+          id: decisionId,
+          status: approvalStatus,
+          agent_id: originalRequest.agent.id,
+          action_type: originalRequest.action.type,
+          idempotency_key: originalRequest.idempotency_key,
+        },
+      }
+  })
+  const input = {
+    hook_event_name: 'PreToolUse',
+    session_id: 'held-session',
+    tool_use_id: 'held-call',
+    tool_name: 'Bash',
+    tool_input: { command: 'echo held' },
+  }
+  assert.match((await runHook(home, input)).stdout, new RegExp(`${decisionId} is awaiting approval`))
+  approvalStatus = 'APPROVED'
+  assert.equal((await decisionReview(await loadConfig(home), decisionId, home)).status, 'APPROVED')
+
+  const released = JSON.parse((await runHook(home, input)).stdout).hookSpecificOutput
+  assert.equal(released.permissionDecision, 'allow')
+  assert.match(released.additionalContext, /held this tool call for approval/)
+  assert.equal(evaluations, 1)
+
+  const again = await runHook(home, { ...input, tool_use_id: 'another-call' })
+  assert.equal(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision, 'deny')
+  assert.match(again.stdout, /next-decision is awaiting approval/)
+})
+
+test('status reports the options a hook saved, because skills do not receive them', async (t) => {
+  const { home } = await fixture(t, (endpoint) =>
+    endpoint === '/v1/decisions' ? { body: { id: 'allowed-1', status: 'ALLOWED' } } : undefined,
+  )
+  assert.equal((await status(home, {})).mode, 'MONITORING')
+  await runHook(home, {
+    hook_event_name: 'PreToolUse',
+    session_id: 'settings',
+    tool_use_id: 'settings-call',
+    tool_name: 'Bash',
+    tool_input: { command: 'echo settings' },
+  })
+  assert.equal((await status(home, {})).mode, 'ENFORCING')
+  assert.equal((await status(home, { CLAUDE_PLUGIN_OPTION_MODE: 'Monitoring' })).mode, 'MONITORING')
 })
 
 test('changed arguments or session cannot reuse an approved Decision', async (t) => {

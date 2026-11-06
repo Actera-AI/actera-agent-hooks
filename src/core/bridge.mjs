@@ -339,6 +339,16 @@ export async function reviewerLinkStatus(config, home = bridgeHome(), timeoutMs 
 
 // An approved Decision releases exactly one held tool call. Returns false
 // when another call already used it.
+async function approvalClaimed(home, decisionId) {
+  if (await legacyApprovalClaimed(home, decisionId)) return true
+  try {
+    await readFile(approvalClaimPath(home, decisionId))
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
+}
 export async function claimApproval(home, decisionId) {
   if (await legacyApprovalClaimed(home, decisionId)) return false
   try {
@@ -369,10 +379,13 @@ export async function decisionStatus(config, decisionId, timeoutMs = 5000) {
 }
 
 const alreadyReleased = () => new Error('This approved Decision already released another tool call')
+// Without a claim, the caller leaves it to the held call's next hook run.
+const usableApproval = async (home, decisionId, claim) =>
+  claim ? claimApproval(home, decisionId) : !(await approvalClaimed(home, decisionId))
 
 // The linked person approves or rejects a held Decision from the agent host.
 // Actera checks that they may review it; an approval is claimed for this call.
-export async function reviewDecision(config, decisionId, choice, { home = bridgeHome(), idempotencyPrefix, rejectReason, timeoutMs = 8000 }) {
+export async function reviewDecision(config, decisionId, choice, { home = bridgeHome(), idempotencyPrefix, rejectReason, timeoutMs = 8000, claim = true }) {
   if (!/^[0-9a-f-]{36}$/i.test(decisionId) || !['approve', 'reject'].includes(choice))
     throw new Error('Invalid Decision or review choice')
   let decision = await decisionStatus(config, decisionId, timeoutMs)
@@ -401,16 +414,16 @@ export async function reviewDecision(config, decisionId, choice, { home = bridge
     decision.status !== (choice === 'approve' ? 'APPROVED' : 'REJECTED')
   )
     throw new Error('Actera returned an unexpected review result')
-  if (choice === 'approve' && !(await claimApproval(home, decisionId))) throw alreadyReleased()
+  if (choice === 'approve' && !(await usableApproval(home, decisionId, claim))) throw alreadyReleased()
   return { id: decision.id, status: decision.status }
 }
 
 // A reviewer can resolve a held call in Actera while the host's prompt is
 // open. An approval found here is claimed for this call.
-export async function reviewedElsewhere(config, decisionId, home = bridgeHome(), timeoutMs = 5000) {
+export async function reviewedElsewhere(config, decisionId, home = bridgeHome(), timeoutMs = 5000, { claim = true } = {}) {
   if (!/^[0-9a-f-]{36}$/i.test(decisionId)) throw new Error('Invalid Decision')
   const decision = await decisionStatus(config, decisionId, timeoutMs)
-  if (decision.status === 'APPROVED' && !(await claimApproval(home, decisionId))) throw alreadyReleased()
+  if (decision.status === 'APPROVED' && !(await usableApproval(home, decisionId, claim))) throw alreadyReleased()
   return { id: decision.id, status: decision.status, ...(decision.reason ? { reason: decision.reason } : {}) }
 }
 
