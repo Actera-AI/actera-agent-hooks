@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { deliverBatch, loadConfig, pendingCount, pruneLocalState } from './bridge.mjs'
 
 const protocol = 1
-const revision = 3
+const revision = 4
 // Without reports or control requests, the sender exits; the next hook starts one.
 const idleMs = () => Number(process.env.ACTERA_CLAUDE_DELIVERY_IDLE_MS) || 5 * 60 * 1000
 const identity = home => createHash('sha256').update((process.platform === 'win32' ? path.resolve(home).toLowerCase() : path.resolve(home))).digest('hex')
@@ -134,7 +134,8 @@ export async function runDelivery(home) {
       health.state = 'retrying'
       delete health.recoveredAt
       health.lastError = { at: new Date().toISOString(), message: result.error }
-      health.nextRetryAt = new Date(Date.now() + Math.min(30000, 1000 * 2 ** Math.min(failures - 1, 5))).toISOString()
+      const backoff = Math.min(30000, 1000 * 2 ** Math.min(failures - 1, 5))
+      health.nextRetryAt = new Date(Date.now() + Math.max(backoff, result.retryAfterMs || 0)).toISOString()
     } else {
       failures = 0; health.state = result.pending ? 'sending' : 'idle'; health.nextRetryAt = null
       // Keep the last failure visible, with a separate recovery time.

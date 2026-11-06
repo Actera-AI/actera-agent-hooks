@@ -28,6 +28,7 @@ export {
   disconnect,
   enqueueDecision,
   flush,
+  limitNotice,
   pendingCount,
   provisionBridge,
   pruneLocalState,
