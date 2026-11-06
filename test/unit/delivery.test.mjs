@@ -23,7 +23,7 @@ async function until(check, timeout = 15000, observe) {
 async function fixture(t) {
   const home = await mkdtemp(path.join(tmpdir(), 'actera-delivery-'))
   const decisions = new Map(), reports = new Map(), attempts = [], revokes = []
-  const service = { available: true, loseAcknowledgement: false, disconnectStatus: 200 }
+  const service = { available: true, loseAcknowledgement: false, disconnectStatus: 200, limited: false, refused: 0 }
   const server = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk
     // A sender stopped mid-request leaves a truncated body; answer it like the API would.
@@ -32,6 +32,11 @@ async function fixture(t) {
     if (req.url === '/v1/connection/disconnect') {
       revokes.push(req.headers.authorization)
       res.writeHead(service.disconnectStatus); res.end(JSON.stringify({ disconnected: true })); return
+    }
+    if (req.url === '/v1/decisions' && service.limited) {
+      service.refused++
+      res.writeHead(429, { 'retry-after': '2000000', 'content-type': 'application/json' })
+      res.end(JSON.stringify({ code: 'ResourceExhausted', message: 'evaluation_monthly_limit_exceeded' })); return
     }
     if (req.url === '/v1/decisions') {
       decisions.set(input.idempotency_key, input)
@@ -48,10 +53,10 @@ async function fixture(t) {
   await configure({ baseUrl: `http://127.0.0.1:${server.address().port}`, agentId: 'delivery-test', apiKey: 'actera_' + 'x'.repeat(40), capture: 'metadata' }, home)
   t.after(async () => { await stopDelivery(home); await new Promise(resolve => server.close(resolve)); await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   async function hook(event, id) {
-    await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [cli, 'hook'], { windowsHide: true, env: { ...process.env, ACTERA_CLAUDE_BRIDGE_HOME: home, CLAUDE_PLUGIN_OPTION_MODE: 'Monitoring' } })
-      let error = ''; child.stderr.on('data', data => error += data)
-      child.on('error', reject); child.on('close', code => code ? reject(new Error(error)) : resolve())
+      let error = '', output = ''; child.stderr.on('data', data => error += data); child.stdout.on('data', data => output += data)
+      child.on('error', reject); child.on('close', code => code ? reject(new Error(error)) : resolve(output))
       child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: 'delivery', tool_use_id: id, tool_name: 'Bash', tool_input: { command: 'echo test' } }))
     })
   }
@@ -77,7 +82,7 @@ test('a new sender replaces an old persistent sender and delivers its outcome re
   await cp(fileURLToPath(new URL('../../src', import.meta.url)), path.join(older, 'src'), { recursive: true })
   await cp(fileURLToPath(new URL('../../bin/delivery-worker.mjs', import.meta.url)), path.join(older, 'bin/delivery-worker.mjs'))
   const implementation = path.join(older, 'src/core/delivery.mjs')
-  await writeFile(implementation, (await readFile(implementation, 'utf8')).replace('const revision = 3', 'const revision = 2'))
+  await writeFile(implementation, (await readFile(implementation, 'utf8')).replace('const revision = 4', 'const revision = 2'))
   const worker = spawn(process.execPath, [path.join(older, 'bin/delivery-worker.mjs'), f.home], { windowsHide: true, stdio: 'ignore' })
   worker.on('error', error => { throw error })
   t.after(() => worker.kill())
@@ -85,7 +90,7 @@ test('a new sender replaces an old persistent sender and delivers its outcome re
   const oldPid = (await deliveryStatus(f.home)).pid
   await Promise.all(Array.from({ length: 8 }, () => ensureDelivery(f.home)))
   const current = await deliveryStatus(f.home)
-  assert.equal(current.revision, 3)
+  assert.equal(current.revision, 4)
   assert.notEqual(current.pid, oldPid)
   await f.hook('PreToolUse', 'upgraded')
   await f.hook('PostToolUse', 'upgraded')
@@ -118,6 +123,22 @@ test('outage retries autonomously, survives worker restart, and exposes queue ag
   assert.equal(snapshot.delivery.state, 'idle')
   assert.ok(snapshot.delivery.recoveredAt)
   assert.ok(snapshot.delivery.lastError)
+})
+
+test('a monthly limit waits for Retry-After and tells the person once', async t => {
+  const f = await fixture(t)
+  f.service.limited = true
+  assert.match(JSON.parse(await f.hook('PreToolUse', 'one')).systemMessage, /monthly decisions/)
+  assert.equal(await f.hook('PreToolUse', 'two'), '')
+  await until(async () => (await deliveryStatus(f.home)).state === 'retrying')
+  const snapshot = await status(f.home)
+  assert.match(snapshot.delivery.lastError.message, /monthly decisions/)
+  const wait = Date.parse(snapshot.delivery.nextRetryAt) - Date.now()
+  assert.ok(wait > 50 * 60 * 1000 && wait <= 60 * 60 * 1000, `waits ${wait}ms`)
+  const refused = f.service.refused
+  await delay(1500)
+  assert.equal(f.service.refused, refused)
+  assert.equal(snapshot.pending, 2)
 })
 
 test('an acknowledgement lost after acceptance retries the same idempotency key', async t => {

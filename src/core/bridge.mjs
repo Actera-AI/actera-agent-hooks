@@ -35,6 +35,10 @@ function markerPath(home) {
 function offlinePath(home) {
   return path.join(home, 'offline-until.json')
 }
+
+function limitNoticePath(home) {
+  return path.join(home, 'limit-notice.json')
+}
 function errorPath(home) {
   return path.join(home, 'last-error.json')
 }
@@ -162,7 +166,7 @@ async function archivePreviousConnection(home, previous, count) {
   const moved = []
   const names = [
     'queue', 'approvals', 'tool-calls', 'tool-outcomes', 'reviewer.json', 'registered.json',
-    'offline-until.json', 'last-error.json', 'last-delivery.json', 'last-maintenance.json',
+    'offline-until.json', 'limit-notice.json', 'last-error.json', 'last-delivery.json', 'last-maintenance.json',
   ]
   const restore = async () => {
     for (const name of moved.reverse()) await rename(path.join(archive, name), path.join(home, name))
@@ -495,8 +499,34 @@ async function postActera(config, endpoint, body, timeoutMs) {
     redirect: 'error',
     signal: AbortSignal.timeout(timeoutMs),
   })
+  if (response.status === 429) throw await limitError(endpoint, response)
   if (!response.ok) throw new Error(`Actera ${endpoint} returned HTTP ${response.status}`)
   return response.json()
+}
+
+// Actera reports a monthly limit with the time left in the month. Retrying
+// sooner is refused, and the wait is capped so a plan change is noticed.
+const MAX_RETRY_WAIT_MS = 60 * 60 * 1000
+
+async function limitError(endpoint, response) {
+  const body = await response.json().catch(() => undefined)
+  const monthly = body?.message === 'evaluation_monthly_limit_exceeded'
+  const error = new Error(monthly
+    ? 'This Actera workspace has used its monthly decisions. New activity is not recorded until the limit resets or the plan changes; see Plan & usage in Actera.'
+    : `Actera ${endpoint} returned HTTP 429`)
+  error.monthlyLimit = monthly
+  const seconds = Number(response.headers.get('retry-after'))
+  if (seconds > 0) error.retryAfterMs = Math.min(seconds * 1000, MAX_RETRY_WAIT_MS)
+  return error
+}
+
+// Tells the person about a monthly limit once a day rather than on every tool call.
+export async function limitNotice(error, home = bridgeHome()) {
+  if (!error?.monthlyLimit) return undefined
+  const last = await readJson(limitNoticePath(home))
+  if (last?.at > Date.now() - 24 * 60 * 60 * 1000) return undefined
+  await writeJsonAtomic(limitNoticePath(home), { at: Date.now() })
+  return error.message
 }
 
 export async function deliverBatch(config, { home = bridgeHome(), limit = Infinity, timeoutMs = 1500, force = false } = {}) {
@@ -565,7 +595,7 @@ export async function deliverBatch(config, { home = bridgeHome(), limit = Infini
     await rm(offlinePath(home), { force: true })
   } catch (error) {
     if (!force) await writeJsonAtomic(offlinePath(home), { until: Date.now() + 10_000 })
-    return { sent, pending: (await queueFiles(home)).length, error: error.message }
+    return { sent, pending: (await queueFiles(home)).length, error: error.message, retryAfterMs: error.retryAfterMs }
   }
   return { sent, pending: (await queueFiles(home)).length }
 }

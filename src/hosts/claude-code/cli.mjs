@@ -10,6 +10,7 @@ import {
   claudeToolDecision,
   configure,
   decisionReview,
+  limitNotice,
   disconnect,
   enqueueDecision,
   enqueueToolOutcome,
@@ -213,6 +214,8 @@ async function main() {
       } catch (error) {
         await recordEvaluationError(error).catch(() => {})
       }
+      const notice = await limitNotice(evaluationError).catch(() => undefined)
+      if (notice) output = { ...output, systemMessage: notice }
       if (output) process.stdout.write(JSON.stringify(output) + '\n')
       return
     }

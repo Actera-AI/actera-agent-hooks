@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- A 429 from Actera now honours `Retry-After`, capped at one hour so a plan change is noticed.
+  Before, the delivery worker retried every 30 seconds until the limit reset.
+- A monthly limit now has plain wording in status and in any denied tool call, and Claude Code
+  shows the person a message at most once a day. Enforcement behavior is unchanged.
+
 ## 0.4.0
 
 - Disconnecting also ends the connection in Actera. After queued reports are delivered, the
