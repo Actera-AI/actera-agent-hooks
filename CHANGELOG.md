@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Tool calls are now allowed by default when Actera cannot evaluate them (fail open), for
+  Claude Code and Codex. This only matters in Enforcing mode. Blocking them (fail closed)
+  is still a setting, and a Codex installation that saved `block` keeps it. Unreadable or
+  invalid settings still block, because the person's choice is unknown.
+
 ## 0.4.2
 
 - Claude Code: reviewing a held call no longer claims the approval. The plugin's mod runs the

@@ -372,7 +372,7 @@ export async function status(home = bridgeHome(), callerEnv = process.env) {
     configured: !!config,
     settings: runtimeSettings(env),
     settingsManagedBy: 'Claude /config',
-    ...(config ? { baseUrl: config.baseUrl, agentId: config.agentId, capture: config.capture, mode: config.mode || 'MONITORING', onEvaluationError: config.onEvaluationError || 'deny' } : {}),
+    ...(config ? { baseUrl: config.baseUrl, agentId: config.agentId, capture: config.capture, mode: config.mode || 'MONITORING', onEvaluationError: config.onEvaluationError || 'continue' } : {}),
     ...(await localStatus(home)),
   }
 }

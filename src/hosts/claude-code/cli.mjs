@@ -206,7 +206,7 @@ async function main() {
         output = monitoring ? null : claudeToolDecision(decision)
       } catch (error) {
         evaluationError = error
-        output = !monitoring && (config.onEvaluationError || 'deny') === 'deny' ? claudeEvaluationFailure(error) : null
+        output = !monitoring && (config.onEvaluationError || 'continue') === 'deny' ? claudeEvaluationFailure(error) : null
       }
       try {
         if (request && !decision) await enqueueDecision(request)

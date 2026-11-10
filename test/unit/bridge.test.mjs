@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import test, { after } from 'node:test'
 import { claimApproval } from '../../src/core/bridge.mjs'
 import { scannerBinary, stopScanner } from '../../src/core/scanner-client.mjs'
+import { runtimeSettings as claudeRuntimeSettings, userConfig as claudeUserConfig } from '../../src/hosts/claude-code/settings.mjs'
 import {
   activityForHook,
   agentReadiness,
@@ -946,6 +947,12 @@ test('404 from decision creation denies by default', async (t) => {
       assert.match((await status(home)).lastError.message, /HTTP 404/)
     })
   }
+})
+
+test('Claude Code fails open by default when Actera cannot evaluate', () => {
+  assert.equal(claudeUserConfig.evaluation_failure.default, 'Allow tool calls (fail open)')
+  assert.deepEqual(claudeRuntimeSettings({}), { mode: 'MONITORING', onEvaluationError: 'continue' })
+  assert.equal(claudeRuntimeSettings({ CLAUDE_PLUGIN_OPTION_EVALUATION_FAILURE: 'Block tool calls (fail closed)' }).onEvaluationError, 'deny')
 })
 
 test('handled evaluation errors can be configured to deny without changing the host hook', async (t) => {

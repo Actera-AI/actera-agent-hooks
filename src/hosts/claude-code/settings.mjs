@@ -15,8 +15,8 @@ export const userConfig = Object.freeze({
     type: 'string',
     title: 'When Actera cannot evaluate',
     description: 'Applies only in Enforcing mode: choose what happens on service outages, timeouts, invalid responses or input-scanning failures. Explicit denials and required approvals remain enforced. Monitoring always continues.',
-    options: Object.freeze(['Block tool calls (fail closed)', 'Allow tool calls (fail open)']),
-    default: 'Block tool calls (fail closed)',
+    options: Object.freeze(['Allow tool calls (fail open)', 'Block tool calls (fail closed)']),
+    default: 'Allow tool calls (fail open)',
   }),
 })
 
@@ -54,6 +54,6 @@ export function runtimeSettings(env = process.env) {
   }
   return {
     mode: values.mode === 'Enforcing' ? 'ENFORCING' : 'MONITORING',
-    onEvaluationError: values.evaluation_failure === 'Allow tool calls (fail open)' ? 'continue' : 'deny',
+    onEvaluationError: values.evaluation_failure === 'Block tool calls (fail closed)' ? 'deny' : 'continue',
   }
 }

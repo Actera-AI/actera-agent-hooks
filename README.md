@@ -52,7 +52,9 @@ node actera-hook.mjs status
 node actera-hook.mjs link                          # review held calls in Codex
 ```
 
-`ACTERA_MODE` and `ACTERA_EVALUATION_FAILURE` override the stored values. In Enforcing
+Without stored values the mode is `monitoring` and evaluation failure is `allow`, so tool calls
+run when Actera cannot evaluate them. `ACTERA_MODE` and `ACTERA_EVALUATION_FAILURE` override the
+stored values. In Enforcing
 mode, a call that needs approval waits up to `ACTERA_HOLD_SECONDS` (540 by default) for a
 reviewer; the plugin sets Codex's hook timeout to 600 seconds. If the hold runs out, the
 call is denied and an identical retry within an hour reuses the approval once.

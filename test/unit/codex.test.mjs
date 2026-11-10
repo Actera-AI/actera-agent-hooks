@@ -189,14 +189,14 @@ test('a hold that runs out denies, and the approved retry reuses the same Decisi
   assert.equal(f.decisions.size, 2, 'Changed arguments need a new Decision')
 })
 
-test('enforcing fails closed when Actera is unavailable, and open only when configured', async (t) => {
+test('enforcing fails open when Actera is unavailable, and closed only when configured', async (t) => {
   const f = await fixture(t, { available: (url) => url !== '/v1/decisions' })
   await saveSetting(f.home, 'mode', 'enforcing')
-  const closed = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-1') })
-  assert.match(closed.output.hookSpecificOutput.permissionDecisionReason, /could not evaluate this tool call: Actera decisions returned HTTP 503/)
-  await saveSetting(f.home, 'evaluationFailure', 'allow')
-  const open = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2') })
+  const open = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-1') })
   assert.equal(open.output, null)
+  await saveSetting(f.home, 'evaluationFailure', 'block')
+  const closed = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-2') })
+  assert.match(closed.output.hookSpecificOutput.permissionDecisionReason, /could not evaluate this tool call: Actera decisions returned HTTP 503/)
   const monitoring = await runHook(f.home, { hook_event_name: 'PreToolUse', ...call('exec-3') }, { ACTERA_MODE: 'monitoring', ACTERA_EVALUATION_FAILURE: 'block' })
   assert.equal(monitoring.output, null)
 })

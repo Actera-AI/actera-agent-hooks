@@ -7,7 +7,7 @@ import path from 'node:path'
 // ACTERA_EVALUATION_FAILURE override it for managed or scripted setups.
 export const modes = Object.freeze({ monitoring: 'MONITORING', enforcing: 'ENFORCING' })
 export const evaluationFailures = Object.freeze({ block: 'deny', allow: 'continue' })
-const defaults = Object.freeze({ mode: 'monitoring', evaluationFailure: 'block' })
+const defaults = Object.freeze({ mode: 'monitoring', evaluationFailure: 'allow' })
 
 export class SettingsError extends Error {}
 
