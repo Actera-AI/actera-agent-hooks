@@ -2,9 +2,10 @@ import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
-// Codex plugins have no settings panel, so the mode lives next to the
-// connection and is changed with the plugin's command line. ACTERA_MODE and
-// ACTERA_EVALUATION_FAILURE override it for managed or scripted setups.
+// Hosts whose plugins have no settings panel (Codex, GitHub Copilot) keep the
+// mode next to the connection and change it with the plugin's command line.
+// ACTERA_MODE and ACTERA_EVALUATION_FAILURE override it for managed or
+// scripted setups.
 export const modes = Object.freeze({ monitoring: 'MONITORING', enforcing: 'ENFORCING' })
 export const evaluationFailures = Object.freeze({ block: 'deny', allow: 'continue' })
 const defaults = Object.freeze({ mode: 'monitoring', evaluationFailure: 'block' })
