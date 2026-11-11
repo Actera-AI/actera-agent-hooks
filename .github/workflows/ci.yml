@@ -77,6 +77,25 @@ jobs:
       - run: node --test .github/scripts/*.test.mjs
         timeout-minutes: 5
     timeout-minutes: 10
+  # The one check that protection on main requires. It runs on every event and
+  # passes only when each job above passed.
+  ci-result:
+    if: ${{ always() }}
+    needs:
+      - package
+      - scanner-source
+      - secrets
+      - release-scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every job to pass
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for result in $RESULTS; do test "$result" = success; done
+        timeout-minutes: 5
   # The release workflow publishes a tag only when this job passed for its exact
   # commit, so a release always reuses full CI on main.
   release-ready:
