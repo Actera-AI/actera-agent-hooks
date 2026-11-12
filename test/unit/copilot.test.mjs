@@ -192,6 +192,49 @@ test('MCP tools are named by their tool, with the server from the Copilot sessio
   assert.equal(await mcpToolForHook({ toolName: 'a-b', sessionId: '../escape', toolCallId: 'x' }), undefined)
 })
 
+// The Copilot runtime inside VS Code 1.143 (1.0.100) sends hooks no toolCallId.
+test('a host that sends no tool call ID is still checked, reported and enforced', async (t) => {
+  const f = await fixture(t)
+  const anonymous = (toolArgs, extra) => { const { toolCallId, ...input } = call('unused', toolArgs, extra); return input }
+  const read = anonymous({ path: '/work/note.txt' }, { toolName: 'view' })
+  // The same call twice: each gets its own Decision and its own report.
+  for (let round = 0; round < 2; round++) {
+    const pre = await hook(f.home, 'preToolUse', read)
+    assert.deepEqual([pre.code, pre.output, pre.stderr], [0, null, ''])
+    await hook(f.home, 'postToolUse', done(read))
+  }
+  const other = anonymous({ command: 'exit 3' })
+  await hook(f.home, 'preToolUse', other)
+  await hook(f.home, 'postToolUse', done(other, { resultType: 'success', textResultForLlm: ['x', '<shellId: 0 completed with exit code 3>'].join(String.fromCharCode(10)) }))
+  await flush(await loadConfig(f.home), { home: f.home, force: true })
+  const ids = [...f.decisions.keys()]
+  assert.equal(ids.length, 3)
+  assert.deepEqual(f.decisionBodies()[0].context.copilot, { session_id: sessionId, cwd: '/work' })
+  assert.deepEqual(f.reports.map((r) => [r.decision_id, r.outcome]).sort(), [[ids[0], 'SUCCESS'], [ids[1], 'SUCCESS'], [ids[2], 'FAILURE']])
+  assert.equal((await status(f.home)).lastError, undefined)
+  // An MCP tool is found in the session log by its name.
+  await sessionEvents(f, [{ type: 'tool.execution_start', data: { toolCallId: 'call_other', toolName: 'my-probe-get-order-notes', mcpServerName: 'my-probe', mcpToolName: 'get-order-notes' } }])
+  await hook(f.home, 'preToolUse', anonymous({ order_id: 'A17' }, { toolName: 'my-probe-get-order-notes' }))
+  assert.equal(f.decisionBodies().at(-1).action.type, 'copilot.mcp.get-order-notes')
+})
+
+test('enforcing blocks and holds calls from a host that sends no tool call ID', async (t) => {
+  const f = await fixture(t, { decide: (body) => (body.action.attributes.parameters.command === 'echo held' ? 'PENDING_APPROVAL' : 'BLOCKED') })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const anonymous = (command) => { const { toolCallId, ...input } = call('unused', { command, description: 'Run it' }); return input }
+  const blocked = await hook(f.home, 'preToolUse', anonymous('echo no'))
+  assert.equal(blocked.output.permissionDecision, 'deny')
+  assert.match(blocked.output.permissionDecisionReason, /blocked: Fixture blocks this\./)
+  const held = await hook(f.home, 'preToolUse', anonymous('echo held'), { ACTERA_HOLD_SECONDS: '0.3' })
+  assert.match(held.output.permissionDecisionReason, /still waiting for a reviewer/)
+  f.decisions.get([...f.decisions.keys()].at(-1)).status = 'APPROVED'
+  const retry = await hook(f.home, 'preToolUse', anonymous('echo held'))
+  assert.equal(retry.output.permissionDecision, 'allow')
+  // Without a session there is nothing to tie an outcome to; the call is still checked.
+  const { sessionId: dropped, ...sessionless } = anonymous('echo no')
+  assert.equal((await hook(f.home, 'preToolUse', sessionless)).output.permissionDecision, 'deny')
+})
+
 test('subagent calls carry their agent in context and in the call identity', async (t) => {
   const f = await fixture(t)
   await hook(f.home, 'preToolUse', call('call_1', undefined, { agentId: 'sub-1', agentType: 'explore', parentAgentId: 'main' }))

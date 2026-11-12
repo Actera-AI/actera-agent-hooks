@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- GitHub Copilot: the adapter works when the host sends no tool call ID, as the Copilot
+  runtime inside VS Code does. Before, Enforcing denied every call there and Monitoring
+  recorded calls late and without outcomes. A call is tied to its outcome by its session,
+  tool and exact arguments, and an MCP tool's server comes from the latest record of that
+  tool in the session log. A call without a session is still checked.
+
 ## 0.5.0
 
 - GitHub Copilot: a new adapter in `src/hosts/copilot/` for the Copilot CLI's native hook

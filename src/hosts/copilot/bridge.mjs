@@ -55,6 +55,12 @@ export function toolInput(hook) {
   return hook.toolName === 'apply_patch' && typeof args === 'string' ? { patch: args } : { input: args }
 }
 
+// Copilot CLI gives every tool call an ID and repeats it in the post hooks.
+// The Copilot runtime inside VS Code (1.0.100) sends none.
+function callID(hook) {
+  return typeof hook.toolCallId === 'string' && hook.toolCallId ? hook.toolCallId : undefined
+}
+
 function copilotHome(env = process.env) {
   return env.COPILOT_HOME || path.join(os.homedir(), '.copilot')
 }
@@ -80,7 +86,10 @@ async function sessionTail(file) {
 export async function mcpToolForHook(hook, { env = process.env, attempts = 5, waitMs = 100 } = {}) {
   const name = hook.toolName
   if (typeof name !== 'string' || !name.includes('-')) return undefined
-  if (typeof hook.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(hook.sessionId) || typeof hook.toolCallId !== 'string') return undefined
+  if (typeof hook.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(hook.sessionId)) return undefined
+  // Without a call ID the latest record of a tool with this name is the
+  // evidence: the name alone decides how it splits into server and tool.
+  const callId = callID(hook)
   const file = path.join(copilotHome(env), 'session-state', hook.sessionId, 'events.jsonl')
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt) await delay(waitMs)
@@ -91,7 +100,7 @@ export async function mcpToolForHook(hook, { env = process.env, attempts = 5, wa
       continue
     }
     for (const line of text.split('\n').reverse()) {
-      if (!line.includes(hook.toolCallId)) continue
+      if (!line.includes(callId ?? name)) continue
       let event
       try {
         event = JSON.parse(line)
@@ -99,9 +108,9 @@ export async function mcpToolForHook(hook, { env = process.env, attempts = 5, wa
         continue // A partly written line or the cut at the start of the tail.
       }
       const candidates = [event?.data, ...(Array.isArray(event?.data?.toolRequests) ? event.data.toolRequests : [])]
-      const call = candidates.find((item) => item?.toolCallId === hook.toolCallId && typeof item.mcpServerName === 'string' && typeof item.mcpToolName === 'string')
-      if (call && `${call.mcpServerName}-${call.mcpToolName}` === name)
-        return { server_key: call.mcpServerName.slice(0, 256), tool_name: call.mcpToolName.slice(0, 256) }
+      const call = candidates.find((item) =>
+        (!callId || item?.toolCallId === callId) && typeof item?.mcpServerName === 'string' && typeof item.mcpToolName === 'string' && `${item.mcpServerName}-${item.mcpToolName}` === name)
+      if (call) return { server_key: call.mcpServerName.slice(0, 256), tool_name: call.mcpToolName.slice(0, 256) }
     }
   }
   return undefined
@@ -146,7 +155,7 @@ export async function evaluationForHook(hook, config, home = bridgeHome(), { env
   // No helper outlives the hook; see the note at the top.
   const captured = await captureInput(input, config.capture, { scannerRoot: path.join(home, 'scanner'), persistentScanner: false })
   const omitted = captured.metadata.status === 'omitted' ? captured.metadata.reason : undefined
-  const callIdentity = [credentialID(config), hook.sessionId || '', hook.agentId || '', hook.toolCallId || randomUUID()]
+  const callIdentity = [credentialID(config), hook.sessionId || '', hook.agentId || '', callID(hook) || randomUUID()]
   const callHash = createHash('sha256').update(JSON.stringify(callIdentity)).digest('hex')
   const request = {
     idempotency_key: `copilot-tool:${callHash}`,
@@ -162,7 +171,7 @@ export async function evaluationForHook(hook, config, home = bridgeHome(), { env
       },
     },
     context: {
-      copilot: { ...sessionContext(hook), ...(hook.toolCallId ? { tool_call_id: scalar(hook.toolCallId) } : {}), ...(unresolved ? { mcp_lookup: 'missed' } : {}) },
+      copilot: { ...sessionContext(hook), ...(callID(hook) ? { tool_call_id: scalar(callID(hook)) } : {}), ...(unresolved ? { mcp_lookup: 'missed' } : {}) },
       source: 'copilot_hook',
       capture: config.capture || 'tool-inputs',
       input_capture: captured.metadata,
@@ -171,10 +180,13 @@ export async function evaluationForHook(hook, config, home = bridgeHome(), { env
   return { request, omitted, unresolved }
 }
 
+// What ties a call's pre and post hooks together: its ID, or without one its
+// tool and exact arguments, which the post hook repeats. Only the hash is kept.
 function toolCallKey(hook, config) {
-  if (!hook.sessionId || !hook.toolCallId || typeof hook.toolName !== 'string') return undefined
+  if (typeof hook.sessionId !== 'string' || !hook.sessionId || typeof hook.toolName !== 'string') return undefined
+  const call = callID(hook) ? [callID(hook)] : ['', hook.toolName, canonicalJson(toolInput(hook))]
   return createHash('sha256')
-    .update(JSON.stringify([config.baseUrl, credentialID(config), config.agentId, hook.sessionId, hook.agentId || '', hook.toolCallId]))
+    .update(JSON.stringify([config.baseUrl, credentialID(config), config.agentId, hook.sessionId, hook.agentId || '', ...call]))
     .digest('hex')
 }
 
@@ -210,7 +222,8 @@ export function approvalFingerprint(hook, config) {
 
 export async function rememberToolDecision(hook, config, request, decision, home = bridgeHome()) {
   const key = toolCallKey(hook, config)
-  if (!key) throw new Error('A session and tool call ID are required for reporting')
+  // Without a session the outcome cannot be tied to the call; it is still checked.
+  if (!key) return
   await rememberAdmittedCall(home, key, { decisionId: decision?.id, request, fingerprint: approvalFingerprint(hook, config) })
 }
 
@@ -254,8 +267,10 @@ export async function enqueueToolOutcome(event, hook, config, home = bridgeHome(
   if (!fingerprint || fingerprint !== admitted.fingerprint)
     throw new Error('Post-tool call does not match the admitted Actera action')
   const request = admitted.request
-  return queueOutcomeReport(home, key, outcome, {
-    idempotency_key: `copilot-tool-outcome:${credentialID(config)}:${key}:${outcome}`,
+  // Identical calls without an ID share a key, so their Decision tells their reports apart.
+  const reportKey = callID(hook) ? key : createHash('sha256').update(JSON.stringify([key, admitted.decisionId ?? admitted.savedAt])).digest('hex')
+  return queueOutcomeReport(home, reportKey, outcome, {
+    idempotency_key: `copilot-tool-outcome:${credentialID(config)}:${reportKey}:${outcome}`,
     decision_id: admitted.decisionId,
     _decision_request: request,
     outcome,
@@ -268,7 +283,7 @@ export async function enqueueToolOutcome(event, hook, config, home = bridgeHome(
       source: 'copilot_hook',
       hook_event: event,
       tool_name: hook.toolName,
-      tool_call_id: hook.toolCallId,
+      tool_call_id: callID(hook),
       outcome_scope: 'tool_call',
       summary,
     },
