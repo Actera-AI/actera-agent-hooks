@@ -12,6 +12,7 @@ import {
   copilotEvaluationFailure,
   copilotToolDecision,
   evaluationForHook,
+  rememberReleasedCall,
   rememberToolDecision,
 } from './bridge.mjs'
 
@@ -92,5 +93,7 @@ export async function preToolUse(hook, config, home) {
   } catch (error) {
     await recordEvaluationError(error, home).catch(() => {})
   }
+  if (request && output?.permissionDecision !== 'deny')
+    await rememberReleasedCall(hook, config, request, decision, home).catch((error) => recordEvaluationError(error, home).catch(() => {}))
   return output
 }

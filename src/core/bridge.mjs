@@ -211,6 +211,36 @@ export async function admittedCall(home, key) {
   return readJson(toolCallPath(home, key))
 }
 
+// A host that gives its tool calls no ID stores each one as <prefix>-<stamp>,
+// and a post hook takes the newest one still waiting. Renaming is the claim:
+// only one process can, and the record keeps a name of its own, so delivering
+// its report resolves it and it is pruned like any other.
+export async function takeAdmittedCall(home, prefix) {
+  let names
+  try {
+    names = await readdir(path.join(home, 'tool-calls'))
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  }
+  const waiting = names
+    .filter((name) => name.startsWith(`${prefix}-`) && name.endsWith('.json') && !name.endsWith('-taken.json'))
+    .sort()
+    .reverse()
+  for (const name of waiting) {
+    const key = `${name.slice(0, -'.json'.length)}-taken`
+    try {
+      await rename(path.join(home, 'tool-calls', name), toolCallPath(home, key))
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue // Another post hook took it.
+      throw error
+    }
+    const record = await readJson(toolCallPath(home, key))
+    if (record) return { key, record }
+  }
+  return undefined
+}
+
 // Persist the first body for each outcome so retries retain occurred_at too.
 // Atomic link publication elects one body across concurrent hook processes.
 export async function queueOutcomeReport(home, key, outcome, report) {

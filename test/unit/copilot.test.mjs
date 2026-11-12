@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -190,6 +190,119 @@ test('MCP tools are named by their tool, with the server from the Copilot sessio
   // Built-in tools never contain a hyphen and are never looked up.
   assert.equal(await mcpToolForHook({ toolName: 'powershell', sessionId, toolCallId: 'x' }), undefined)
   assert.equal(await mcpToolForHook({ toolName: 'a-b', sessionId: '../escape', toolCallId: 'x' }), undefined)
+})
+
+// The Copilot runtime inside VS Code 1.143 (1.0.100) sends hooks no toolCallId.
+test('a host that sends no tool call ID is still checked, reported and enforced', async (t) => {
+  const f = await fixture(t)
+  const anonymous = (toolArgs, extra) => { const { toolCallId, ...input } = call('unused', toolArgs, extra); return input }
+  const read = anonymous({ path: '/work/note.txt' }, { toolName: 'view' })
+  // The same call twice: each gets its own Decision and its own report.
+  for (let round = 0; round < 2; round++) {
+    const pre = await hook(f.home, 'preToolUse', read)
+    assert.deepEqual([pre.code, pre.output, pre.stderr], [0, null, ''])
+    await hook(f.home, 'postToolUse', done(read))
+  }
+  const other = anonymous({ command: 'exit 3' })
+  await hook(f.home, 'preToolUse', other)
+  await hook(f.home, 'postToolUse', done(other, { resultType: 'success', textResultForLlm: ['x', '<shellId: 0 completed with exit code 3>'].join(String.fromCharCode(10)) }))
+  await flush(await loadConfig(f.home), { home: f.home, force: true })
+  const ids = [...f.decisions.keys()]
+  assert.equal(ids.length, 3)
+  assert.deepEqual(f.decisionBodies()[0].context.copilot, { session_id: sessionId, cwd: '/work' })
+  assert.deepEqual(f.reports.map((r) => [r.decision_id, r.outcome]).sort(), [[ids[0], 'SUCCESS'], [ids[1], 'SUCCESS'], [ids[2], 'FAILURE']])
+  assert.equal((await status(f.home)).lastError, undefined)
+  // An MCP tool is found in the session log by its name.
+  await sessionEvents(f, [{ type: 'tool.execution_start', data: { toolCallId: 'call_other', toolName: 'my-probe-get-order-notes', mcpServerName: 'my-probe', mcpToolName: 'get-order-notes' } }])
+  await hook(f.home, 'preToolUse', anonymous({ order_id: 'A17' }, { toolName: 'my-probe-get-order-notes' }))
+  assert.equal(f.decisionBodies().at(-1).action.type, 'copilot.mcp.get-order-notes')
+})
+
+test('enforcing blocks and holds calls from a host that sends no tool call ID', async (t) => {
+  const f = await fixture(t, { decide: (body) => (body.action.attributes.parameters.command === 'echo held' ? 'PENDING_APPROVAL' : 'BLOCKED') })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const anonymous = (command) => { const { toolCallId, ...input } = call('unused', { command, description: 'Run it' }); return input }
+  const blocked = await hook(f.home, 'preToolUse', anonymous('echo no'))
+  assert.equal(blocked.output.permissionDecision, 'deny')
+  assert.match(blocked.output.permissionDecisionReason, /blocked: Fixture blocks this\./)
+  const held = await hook(f.home, 'preToolUse', anonymous('echo held'), { ACTERA_HOLD_SECONDS: '0.3' })
+  assert.match(held.output.permissionDecisionReason, /still waiting for a reviewer/)
+  f.decisions.get([...f.decisions.keys()].at(-1)).status = 'APPROVED'
+  const retry = await hook(f.home, 'preToolUse', anonymous('echo held'))
+  assert.equal(retry.output.permissionDecision, 'allow')
+  // Without a session there is nothing to tie an outcome to; the call is still checked.
+  const { sessionId: dropped, ...sessionless } = anonymous('echo no')
+  assert.match((await hook(f.home, 'preToolUse', sessionless)).output.permissionDecisionReason, /blocked: Fixture blocks this\./)
+})
+
+// VS Code runs every pre hook of a turn before any of its tools.
+test('calls without an ID in one turn report on their own Decisions and are cleaned up', async (t) => {
+  const f = await fixture(t)
+  const anonymous = (command) => { const { toolCallId, ...input } = call('unused', { command }); return input }
+  const exited = (code) => ({ resultType: 'success', textResultForLlm: ['x', `<shellId: 0 completed with exit code ${code}>`].join(String.fromCharCode(10)) })
+  // Different arguments keep two calls apart.
+  const [a, b] = [anonymous('echo a'), anonymous('echo b')]
+  await hook(f.home, 'preToolUse', a)
+  await hook(f.home, 'preToolUse', b)
+  await hook(f.home, 'postToolUse', done(a, exited(0)))
+  await hook(f.home, 'postToolUse', done(b, exited(1)))
+  // Two identical calls each get one report, and a third post hook finds no call left.
+  const same = anonymous('echo same')
+  await hook(f.home, 'preToolUse', same)
+  await hook(f.home, 'preToolUse', same)
+  for (let post = 0; post < 3; post++) await hook(f.home, 'postToolUse', done(same, exited(0)))
+  await flush(await loadConfig(f.home), { home: f.home, force: true })
+  const ids = [...f.decisions.keys()]
+  assert.deepEqual(f.reports.map((r) => [r.decision_id, r.outcome]).sort(), [[ids[0], 'SUCCESS'], [ids[1], 'FAILURE'], [ids[2], 'SUCCESS'], [ids[3], 'SUCCESS']])
+  // Each record was taken by one post hook and resolved by the delivery, so it is pruned like any other.
+  const records = await readdir(path.join(f.home, 'tool-calls'))
+  assert.equal(records.length, 4)
+  for (const name of records) {
+    assert.match(name, /-taken\.json$/)
+    assert.ok(JSON.parse(await readFile(path.join(f.home, 'tool-calls', name), 'utf8')).resolvedAt, name)
+  }
+})
+
+test('a call without an ID that never finished does not take the outcome of a later identical call', async (t) => {
+  const f = await fixture(t)
+  const { toolCallId, ...same } = call('unused', { command: 'echo same' })
+  // The first call is let through and interrupted: no post hook comes for it.
+  await hook(f.home, 'preToolUse', same)
+  await hook(f.home, 'preToolUse', same)
+  await hook(f.home, 'postToolUse', done(same))
+  await flush(await loadConfig(f.home), { home: f.home, force: true })
+  assert.deepEqual(f.reports.map((r) => r.decision_id), [[...f.decisions.keys()][1]])
+})
+
+// Two identical held calls can share one Decision, depending on which hook
+// saves its pending approval first, so this uses a block to deny one of them.
+test('a denied call without an ID leaves its record to no later post hook', async (t) => {
+  const answers = ['ALLOWED', 'BLOCKED', 'BLOCKED', 'ALLOWED']
+  const f = await fixture(t, { decide: () => answers.shift() })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  const { toolCallId, ...same } = call('unused', { command: 'echo same', description: 'Run it' })
+  // In each turn one of two identical calls is let through and the other denied, in either order.
+  for (let turn = 0; turn < 2; turn++) {
+    const results = [await hook(f.home, 'preToolUse', same), await hook(f.home, 'preToolUse', same)]
+    assert.deepEqual(results.map((result) => result.output?.permissionDecision ?? 'run').sort(), ['deny', 'run'])
+    const waiting = (await readdir(path.join(f.home, 'tool-calls'))).filter((name) => !name.endsWith('-taken.json'))
+    assert.equal(waiting.length, 1, 'Only the call that runs waits for a post hook')
+    await hook(f.home, 'postToolUse', done(same))
+  }
+  await flush(await loadConfig(f.home), { home: f.home, force: true })
+  const ids = [...f.decisions.keys()]
+  assert.deepEqual(f.reports.map((r) => [r.decision_id, r.outcome]).sort(), [[ids[0], 'SUCCESS'], [ids[3], 'SUCCESS']])
+})
+
+test('without a call ID an MCP tool name has to split one way only', async (t) => {
+  const f = await fixture(t)
+  const lookup = (hook) => mcpToolForHook({ sessionId, ...hook }, { env: { COPILOT_HOME: f.copilotHome }, attempts: 1 })
+  const record = (toolCallId, mcpServerName, mcpToolName) => ({ type: 'tool.execution_start', data: { toolCallId, toolName: 'a-b-c', mcpServerName, mcpToolName } })
+  await sessionEvents(f, [record('call_1', 'a', 'b-c'), record('call_2', 'a', 'b-c')])
+  assert.deepEqual(await lookup({ toolName: 'a-b-c' }), { server_key: 'a', tool_name: 'b-c' })
+  await sessionEvents(f, [record('call_1', 'a', 'b-c'), record('call_2', 'a-b', 'c')])
+  assert.equal(await lookup({ toolName: 'a-b-c' }), undefined)
+  assert.deepEqual(await lookup({ toolName: 'a-b-c', toolCallId: 'call_2' }), { server_key: 'a-b', tool_name: 'c' })
 })
 
 test('subagent calls carry their agent in context and in the call identity', async (t) => {
