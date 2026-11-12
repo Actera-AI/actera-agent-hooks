@@ -15,18 +15,21 @@ export class SettingsError extends Error {}
 const settingsPath = home => path.join(home, 'settings.json')
 
 async function stored(home) {
+  let saved
   try {
-    return JSON.parse(await readFile(settingsPath(home), 'utf8'))
+    saved = JSON.parse(await readFile(settingsPath(home), 'utf8'))
   } catch (error) {
     if (error?.code === 'ENOENT') return {}
-    throw new SettingsError('Actera settings are unreadable. Set them again with actera-hook.mjs mode.')
   }
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved))
+    throw new SettingsError('Actera settings are unreadable. Set them again with actera-hook.mjs mode.')
+  return saved
 }
 
 export async function runtimeSettings(home, env = process.env) {
   const saved = await stored(home)
-  const mode = (env.ACTERA_MODE ?? saved.mode ?? defaults.mode).toLowerCase()
-  const failure = (env.ACTERA_EVALUATION_FAILURE ?? saved.evaluationFailure ?? defaults.evaluationFailure).toLowerCase()
+  const mode = String(env.ACTERA_MODE ?? saved.mode ?? defaults.mode).toLowerCase()
+  const failure = String(env.ACTERA_EVALUATION_FAILURE ?? saved.evaluationFailure ?? defaults.evaluationFailure).toLowerCase()
   if (!(mode in modes)) throw new SettingsError('Invalid Actera mode. Use monitoring or enforcing.')
   if (!(failure in evaluationFailures)) throw new SettingsError('Invalid evaluation failure setting. Use block or allow.')
   return { mode: modes[mode], onEvaluationError: evaluationFailures[failure], modeName: mode, evaluationFailureName: failure }
@@ -36,7 +39,8 @@ export async function saveSetting(home, name, value) {
   const choices = name === 'mode' ? modes : evaluationFailures
   const normalized = String(value ?? '').toLowerCase()
   if (!(normalized in choices)) throw new SettingsError(`Choose one of: ${Object.keys(choices).join(', ')}`)
-  const next = { ...(await stored(home)), [name]: normalized }
+  // An unreadable file is replaced: the other setting returns to its default.
+  const next = { ...(await stored(home).catch(() => ({}))), [name]: normalized }
   await mkdir(home, { recursive: true, mode: 0o700 })
   const temporary = `${settingsPath(home)}.${randomUUID()}.tmp`
   try {

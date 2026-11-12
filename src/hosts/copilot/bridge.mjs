@@ -80,7 +80,7 @@ async function sessionTail(file) {
 export async function mcpToolForHook(hook, { env = process.env, attempts = 5, waitMs = 100 } = {}) {
   const name = hook.toolName
   if (typeof name !== 'string' || !name.includes('-')) return undefined
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(hook.sessionId || '') || typeof hook.toolCallId !== 'string') return undefined
+  if (typeof hook.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(hook.sessionId) || typeof hook.toolCallId !== 'string') return undefined
   const file = path.join(copilotHome(env), 'session-state', hook.sessionId, 'events.jsonl')
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt) await delay(waitMs)
@@ -138,6 +138,11 @@ export async function evaluationForHook(hook, config, home = bridgeHome(), { env
   validHook(hook)
   const input = toolInput(hook)
   const mcp = await mcpToolForHook(hook, { env })
+  // Copilot's own tools have no hyphen in their names, so a hyphenated tool the
+  // session log does not describe is taken for an MCP tool whose server is
+  // unknown. It keeps its full name and says so, because a policy written for
+  // copilot.mcp.<tool> does not cover it.
+  const unresolved = !mcp && hook.toolName.includes('-')
   // No helper outlives the hook; see the note at the top.
   const captured = await captureInput(input, config.capture, { scannerRoot: path.join(home, 'scanner'), persistentScanner: false })
   const omitted = captured.metadata.status === 'omitted' ? captured.metadata.reason : undefined
@@ -157,13 +162,13 @@ export async function evaluationForHook(hook, config, home = bridgeHome(), { env
       },
     },
     context: {
-      copilot: { ...sessionContext(hook), ...(hook.toolCallId ? { tool_call_id: scalar(hook.toolCallId) } : {}) },
+      copilot: { ...sessionContext(hook), ...(hook.toolCallId ? { tool_call_id: scalar(hook.toolCallId) } : {}), ...(unresolved ? { mcp_lookup: 'missed' } : {}) },
       source: 'copilot_hook',
       capture: config.capture || 'tool-inputs',
       input_capture: captured.metadata,
     },
   }
-  return { request, omitted }
+  return { request, omitted, unresolved }
 }
 
 function toolCallKey(hook, config) {
@@ -194,12 +199,12 @@ function proposedInput(hook) {
 }
 
 // A retry is the same proposed effect only within one Copilot session (and
-// subagent), for the same tool and arguments. Never persist plaintext tool
-// arguments.
+// subagent), in the same working directory, for the same tool and arguments.
+// Never persist plaintext tool arguments.
 export function approvalFingerprint(hook, config) {
   if (!hook.sessionId || typeof hook.toolName !== 'string') return undefined
   return createHash('sha256')
-    .update(canonicalJson([credentialID(config), config.agentId, hook.sessionId, hook.agentId || '', hook.toolName, proposedInput(hook)]))
+    .update(canonicalJson([credentialID(config), config.agentId, hook.sessionId, hook.agentId || '', hook.cwd || '', hook.toolName, proposedInput(hook)]))
     .digest('hex')
 }
 

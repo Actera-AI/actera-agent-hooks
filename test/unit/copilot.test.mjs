@@ -9,7 +9,7 @@ import test from 'node:test'
 import { configure, flush } from '../../src/core/bridge.mjs'
 import { stopScanner } from '../../src/core/scanner-client.mjs'
 import { saveSetting } from '../../src/core/settings.mjs'
-import { loadConfig, mcpToolForHook, toolInput } from '../../src/hosts/copilot/bridge.mjs'
+import { loadConfig, mcpToolForHook, status, toolInput } from '../../src/hosts/copilot/bridge.mjs'
 
 const cli = fileURLToPath(new URL('../../src/hosts/copilot/cli.mjs', import.meta.url))
 const key = 'actera_' + 'p'.repeat(40)
@@ -182,6 +182,11 @@ test('MCP tools are named by their tool, with the server from the Copilot sessio
   assert.equal(mcp.action.attributes.tool_name, 'my-probe-get-order-notes')
   assert.equal(unknown.action.type, 'copilot.tool.other-server-search')
   assert.equal(unknown.action.attributes.mcp, undefined)
+  // The miss is visible to policies and in status, and a found tool carries no mark.
+  assert.equal(unknown.context.copilot.mcp_lookup, 'missed')
+  assert.equal(mcp.context.copilot.mcp_lookup, undefined)
+  assert.match((await status(f.home)).lastError.message, /does not name the MCP server of other-server-search/)
+  assert.equal(await mcpToolForHook({ toolName: 'a-b', sessionId: 42, toolCallId: 'x' }), undefined)
   // Built-in tools never contain a hyphen and are never looked up.
   assert.equal(await mcpToolForHook({ toolName: 'powershell', sessionId, toolCallId: 'x' }), undefined)
   assert.equal(await mcpToolForHook({ toolName: 'a-b', sessionId: '../escape', toolCallId: 'x' }), undefined)
@@ -249,6 +254,32 @@ test('a hold that runs out denies with the review link, and the approved retry r
   assert.equal(f.decisions.size, 3, 'Each held attempt after the release needs a new Decision')
 })
 
+test('an approval does not carry over to another working directory', async (t) => {
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  await hook(f.home, 'preToolUse', call('call_1'), { ACTERA_HOLD_SECONDS: '0.3' })
+  f.decisions.get([...f.decisions.keys()][0]).status = 'APPROVED'
+  const elsewhere = await hook(f.home, 'preToolUse', call('call_2', undefined, { cwd: '/elsewhere' }), { ACTERA_HOLD_SECONDS: '0.3' })
+  assert.equal(elsewhere.output.permissionDecision, 'deny')
+  assert.equal(f.decisions.size, 2, 'The same command elsewhere is a new request')
+})
+
+test('a call held before stays held while its approval cannot be checked, even when failing open', async (t) => {
+  let lookups = true
+  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL', available: (url) => lookups || !url.endsWith('/status') })
+  await saveSetting(f.home, 'mode', 'enforcing')
+  await saveSetting(f.home, 'evaluationFailure', 'allow')
+  await hook(f.home, 'preToolUse', call('call_1'), { ACTERA_HOLD_SECONDS: '0.3' })
+  lookups = false
+  const retry = await hook(f.home, 'preToolUse', call('call_2'))
+  assert.equal(retry.output.permissionDecision, 'deny')
+  assert.match(retry.output.permissionDecisionReason, /could not evaluate/)
+  assert.equal(f.decisions.size, 1, 'The retry is not sent as a new request')
+  // A call Actera never answered still follows the choice to fail open.
+  const other = await hook(f.home, 'preToolUse', call('call_3', { command: 'echo other' }), { ACTERA_HOLD_SECONDS: '0.3' })
+  assert.equal(other.output.permissionDecision, 'deny', 'A new call is held as usual')
+})
+
 // Copilot's model writes a new description for every shell call, so a retry of
 // the same command must still match the approved one.
 test('an approved retry of the same command reuses the approval although its description changed', async (t) => {
@@ -298,6 +329,15 @@ test('broken input and settings deny only where enforcement asks, and the hook a
   const post = await hook(f.home, 'postToolUse', '{not json')
   assert.deepEqual([post.code, post.output], [0, null])
   assert.equal(f.decisions.size, 0)
+  // Settings of the wrong shape are unreadable too, and setting the mode repairs the file.
+  for (const broken of ['null', '{"mode":5}', '{"mode":']) {
+    await writeFile(path.join(f.home, 'settings.json'), broken)
+    const denied = await hook(f.home, 'preToolUse', call('call_2'))
+    assert.deepEqual([denied.code, denied.output.permissionDecision], [0, 'deny'], broken)
+  }
+  assert.equal(f.decisions.size, 0)
+  assert.equal((await run(f.home, ['mode', 'enforcing'])).code, 0)
+  assert.deepEqual([(await hook(f.home, 'preToolUse', call('call_3'))).output, f.decisions.size], [null, 1])
 })
 
 test('secrets in a command are redacted, and the hook leaves no process running', async (t) => {

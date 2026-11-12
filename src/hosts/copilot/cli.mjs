@@ -7,7 +7,7 @@ import {
   recordEvaluationError,
 } from '../../core/bridge.mjs'
 import { connectWithSetupCode, pair } from '../../core/pairing.mjs'
-import { SettingsError, runtimeSettings, saveSetting } from '../../core/settings.mjs'
+import { runtimeSettings, saveSetting } from '../../core/settings.mjs'
 import {
   EVENTS,
   bridgeHome,
@@ -63,7 +63,7 @@ async function hook(home, event) {
     await recordEvaluationError(error, home).catch(() => {})
     // Unreadable settings must not silently downgrade enforcement.
     const settings = await runtimeSettings(home).catch((settingsError) => settingsError)
-    const deny = settings instanceof SettingsError || (settings.mode === 'ENFORCING' && settings.onEvaluationError === 'deny')
+    const deny = settings instanceof Error || (settings.mode === 'ENFORCING' && settings.onEvaluationError === 'deny')
     if (event === 'preToolUse' && deny) process.stdout.write(JSON.stringify(copilotEvaluationFailure(error)) + '\n')
     return
   }

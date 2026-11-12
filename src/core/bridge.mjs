@@ -388,7 +388,11 @@ export async function decisionStatus(config, decisionId, timeoutMs = 5000) {
 export async function holdForApproval(config, decision, home, { holdMs, pollMs, signal } = {}) {
   const deadline = Date.now() + holdMs
   let current = decision
-  while (Date.now() < deadline && !signal?.aborted) {
+  // Look once even when no time is left, so a review made meanwhile and the
+  // review link are not missed.
+  let looked = false
+  while ((!looked || Date.now() < deadline) && !signal?.aborted) {
+    looked = true
     try {
       await delay(Math.min(pollMs, Math.max(0, deadline - Date.now())), undefined, { signal })
       current = await decisionStatus(config, decision.id)

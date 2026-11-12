@@ -109,7 +109,7 @@ reports status like the Codex one (`connect`, `mode`, `evaluation-failure`, `sta
   reads the server and tool for that call from the session's `events.jsonl` under
   `COPILOT_HOME` (`~/.copilot` by default) and records `copilot.mcp.<tool>` with the server
   as evidence. That file is not a documented contract: a call it does not describe stays
-  `copilot.tool.<server>-<tool>`.
+  `copilot.tool.<server>-<tool>`, with `context.copilot.mcp_lookup` set to `missed`.
 - Decisions go back in Copilot's camelCase shape (`permissionDecision`,
   `permissionDecisionReason`). An Actera approval returns `allow`, so Copilot does not ask
   again for that call.
