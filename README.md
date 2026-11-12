@@ -112,7 +112,8 @@ reports status like the Codex one (`connect`, `mode`, `evaluation-failure`, `sta
   `copilot.tool.<server>-<tool>`, with `context.copilot.mcp_lookup` set to `missed`.
 - The Copilot CLI gives each tool call an ID. The Copilot runtime inside VS Code sends none,
   so there a call is tied to its outcome by its session, tool and exact arguments, and an MCP
-  tool's server is taken from the latest record of that tool in the session log.
+  tool's server is taken from the session log's records of that tool. Two identical calls in
+  one turn can have their outcomes swapped.
 - Decisions go back in Copilot's camelCase shape (`permissionDecision`,
   `permissionDecisionReason`). An Actera approval returns `allow`, so Copilot does not ask
   again for that call.

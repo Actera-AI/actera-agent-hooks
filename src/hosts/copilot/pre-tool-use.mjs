@@ -12,6 +12,7 @@ import {
   copilotEvaluationFailure,
   copilotToolDecision,
   evaluationForHook,
+  forgetToolDecision,
   rememberToolDecision,
 } from './bridge.mjs'
 
@@ -84,6 +85,7 @@ export async function preToolUse(hook, config, home) {
       output = monitoring ? null : decision ? copilotToolDecision(decision) : config.onEvaluationError === 'deny' ? copilotEvaluationFailure(error) : null
   }
   try {
+    if (output?.permissionDecision === 'deny') await forgetToolDecision(hook, config, home)
     if (request && !decision && !stillHeld) await enqueueDecision(request, home)
     if (evaluationError) await recordEvaluationError(evaluationError, home)
     // After a hold there may be little time left before Copilot's timeout;

@@ -6,10 +6,12 @@ import { setTimeout as delay } from 'node:timers/promises'
 import {
   admittedCall,
   credentialID,
+  forgetAdmittedCall,
   loadConfig as loadConnection,
   localStatus,
   queueOutcomeReport,
   rememberAdmittedCall,
+  takeAdmittedCall,
 } from '../../core/bridge.mjs'
 import { ExecutionOutcome } from '../../core/generated/outcomes.mjs'
 import { captureInput } from '../../core/input-capture.mjs'
@@ -87,8 +89,8 @@ export async function mcpToolForHook(hook, { env = process.env, attempts = 5, wa
   const name = hook.toolName
   if (typeof name !== 'string' || !name.includes('-')) return undefined
   if (typeof hook.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(hook.sessionId)) return undefined
-  // Without a call ID the latest record of a tool with this name is the
-  // evidence: the name alone decides how it splits into server and tool.
+  // Without a call ID the records of tools with this name are the evidence,
+  // and they have to split it into server and tool the same way.
   const callId = callID(hook)
   const file = path.join(copilotHome(env), 'session-state', hook.sessionId, 'events.jsonl')
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -99,6 +101,7 @@ export async function mcpToolForHook(hook, { env = process.env, attempts = 5, wa
     } catch {
       continue
     }
+    const splits = new Map()
     for (const line of text.split('\n').reverse()) {
       if (!line.includes(callId ?? name)) continue
       let event
@@ -108,10 +111,16 @@ export async function mcpToolForHook(hook, { env = process.env, attempts = 5, wa
         continue // A partly written line or the cut at the start of the tail.
       }
       const candidates = [event?.data, ...(Array.isArray(event?.data?.toolRequests) ? event.data.toolRequests : [])]
-      const call = candidates.find((item) =>
-        (!callId || item?.toolCallId === callId) && typeof item?.mcpServerName === 'string' && typeof item.mcpToolName === 'string' && `${item.mcpServerName}-${item.mcpToolName}` === name)
-      if (call) return { server_key: call.mcpServerName.slice(0, 256), tool_name: call.mcpToolName.slice(0, 256) }
+      for (const item of candidates) {
+        if (callId && item?.toolCallId !== callId) continue
+        if (typeof item?.mcpServerName !== 'string' || typeof item.mcpToolName !== 'string' || `${item.mcpServerName}-${item.mcpToolName}` !== name) continue
+        const found = { server_key: item.mcpServerName.slice(0, 256), tool_name: item.mcpToolName.slice(0, 256) }
+        if (callId) return found
+        splits.set(JSON.stringify(found), found)
+      }
     }
+    if (splits.size === 1) return splits.values().next().value
+    if (splits.size > 1) return undefined
   }
   return undefined
 }
@@ -180,6 +189,10 @@ export async function evaluationForHook(hook, config, home = bridgeHome(), { env
   return { request, omitted, unresolved }
 }
 
+// One hook process handles one call. Without a call ID the call's record is
+// named by this stamp, which sorts by time.
+const admissionStamp = `${Date.now().toString(36).padStart(9, '0')}${randomUUID().slice(0, 8)}`
+
 // What ties a call's pre and post hooks together: its ID, or without one its
 // tool and exact arguments, which the post hook repeats. Only the hash is kept.
 function toolCallKey(hook, config) {
@@ -221,10 +234,25 @@ export function approvalFingerprint(hook, config) {
 }
 
 export async function rememberToolDecision(hook, config, request, decision, home = bridgeHome()) {
-  const key = toolCallKey(hook, config)
+  const key = admissionKey(hook, config)
   // Without a session the outcome cannot be tied to the call; it is still checked.
   if (!key) return
   await rememberAdmittedCall(home, key, { decisionId: decision?.id, request, fingerprint: approvalFingerprint(hook, config) })
+}
+
+// Calls with the same tool and arguments share a key when they have no ID, so
+// each is stored under that key and this process's stamp.
+function admissionKey(hook, config) {
+  const key = toolCallKey(hook, config)
+  return key && !callID(hook) ? `${key}-${admissionStamp}` : key
+}
+
+// A call that is not let through gets no post hook. Without an ID its record
+// would wait for the post hook of a later, identical call.
+export async function forgetToolDecision(hook, config, home = bridgeHome()) {
+  if (callID(hook)) return
+  const key = admissionKey(hook, config)
+  if (key) await forgetAdmittedCall(home, key)
 }
 
 // Copilot ends a shell tool's result text with this line. It is not a
@@ -261,16 +289,16 @@ export async function enqueueToolOutcome(event, hook, config, home = bridgeHome(
   if (!outcome) return undefined
   const key = toolCallKey(hook, config)
   if (!key) return undefined
-  const admitted = await admittedCall(home, key)
+  // Without a call ID this is the newest waiting call with this tool and these arguments.
+  const taken = callID(hook) ? { key, record: await admittedCall(home, key) } : await takeAdmittedCall(home, key)
+  const admitted = taken?.record
   if (!admitted) return undefined
   const fingerprint = approvalFingerprint(hook, config)
   if (!fingerprint || fingerprint !== admitted.fingerprint)
     throw new Error('Post-tool call does not match the admitted Actera action')
   const request = admitted.request
-  // Identical calls without an ID share a key, so their Decision tells their reports apart.
-  const reportKey = callID(hook) ? key : createHash('sha256').update(JSON.stringify([key, admitted.decisionId ?? admitted.savedAt])).digest('hex')
-  return queueOutcomeReport(home, reportKey, outcome, {
-    idempotency_key: `copilot-tool-outcome:${credentialID(config)}:${reportKey}:${outcome}`,
+  return queueOutcomeReport(home, taken.key, outcome, {
+    idempotency_key: `copilot-tool-outcome:${credentialID(config)}:${taken.key}:${outcome}`,
     decision_id: admitted.decisionId,
     _decision_request: request,
     outcome,
