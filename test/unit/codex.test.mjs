@@ -10,7 +10,7 @@ import { configure, flush } from '../../src/core/bridge.mjs'
 import { deliveryStatus, stopDelivery } from '../../src/core/delivery.mjs'
 import { stopScanner } from '../../src/core/scanner-client.mjs'
 import { loadConfig, mcpToolForHook, transcriptOutcome } from '../../src/hosts/codex/bridge.mjs'
-import { saveSetting } from '../../src/hosts/codex/settings.mjs'
+import { saveSetting } from '../../src/core/settings.mjs'
 
 const cli = fileURLToPath(new URL('../../src/hosts/codex/cli.mjs', import.meta.url))
 const mcpServer = fileURLToPath(new URL('../../src/hosts/codex/mcp-server.mjs', import.meta.url))

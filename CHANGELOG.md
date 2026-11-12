@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+- GitHub Copilot: a new adapter in `src/hosts/copilot/` for the Copilot CLI's native hook
+  events. Actions are `copilot.tool.<tool>` with Copilot's own tool names, and
+  `copilot.mcp.<tool>` for MCP tools, whose server comes from the Copilot session. Held calls
+  are denied with a review link before Copilot's hook timeout, and an identical retry reuses
+  the approval once. A shell command that exits with an error is reported as `FAILURE`,
+  although Copilot runs `postToolUse` for it. Pairing and setup codes send
+  `client: "copilot"`, which needs an Actera API that accepts it.
+- The file-based mode settings and the held-call polling move from the Codex adapter to
+  `src/core/` so Codex and Copilot share them. The `./codex/settings` export is now
+  `./core/settings`, and `holdForApproval` is exported from `./core` only. Codex behavior is
+  unchanged.
+- A hold with no time left still looks up the Decision once, so its denial has the review
+  link. Settings of the wrong shape count as unreadable, and setting the mode again repairs
+  an unreadable file.
+- A held call's saved approval keeps its redacted request, so a retry that reuses the Decision
+  can report against the action Actera captured.
+
 ## 0.4.2
 
 - Claude Code: reviewing a held call no longer claims the approval. The plugin's mod runs the
