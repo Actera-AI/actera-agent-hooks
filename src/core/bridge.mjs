@@ -211,10 +211,6 @@ export async function admittedCall(home, key) {
   return readJson(toolCallPath(home, key))
 }
 
-export async function forgetAdmittedCall(home, key) {
-  await rm(toolCallPath(home, key), { force: true })
-}
-
 // A host that gives its tool calls no ID stores each one as <prefix>-<stamp>,
 // and a post hook takes the newest one still waiting. Renaming is the claim:
 // only one process can, and the record keeps a name of its own, so delivering

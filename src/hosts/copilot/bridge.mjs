@@ -6,7 +6,6 @@ import { setTimeout as delay } from 'node:timers/promises'
 import {
   admittedCall,
   credentialID,
-  forgetAdmittedCall,
   loadConfig as loadConnection,
   localStatus,
   queueOutcomeReport,
@@ -233,26 +232,24 @@ export function approvalFingerprint(hook, config) {
     .digest('hex')
 }
 
+// A call with an ID is remembered as soon as it is known and again with its
+// Decision. Without a session the outcome cannot be tied to the call; it is
+// still checked.
 export async function rememberToolDecision(hook, config, request, decision, home = bridgeHome()) {
-  const key = admissionKey(hook, config)
-  // Without a session the outcome cannot be tied to the call; it is still checked.
-  if (!key) return
+  const key = toolCallKey(hook, config)
+  if (!key || !callID(hook)) return
   await rememberAdmittedCall(home, key, { decisionId: decision?.id, request, fingerprint: approvalFingerprint(hook, config) })
 }
 
-// Calls with the same tool and arguments share a key when they have no ID, so
-// each is stored under that key and this process's stamp.
-function admissionKey(hook, config) {
+// A call without an ID shares its key with every call of the same tool and
+// arguments, so it is stored under that key and this process's stamp. It is
+// written once, when the pre hook knows the call runs: an earlier record could
+// be taken by the post hook of an identical call, and a call that does not run
+// gets no post hook.
+export async function rememberReleasedCall(hook, config, request, decision, home = bridgeHome()) {
   const key = toolCallKey(hook, config)
-  return key && !callID(hook) ? `${key}-${admissionStamp}` : key
-}
-
-// A call that is not let through gets no post hook. Without an ID its record
-// would wait for the post hook of a later, identical call.
-export async function forgetToolDecision(hook, config, home = bridgeHome()) {
-  if (callID(hook)) return
-  const key = admissionKey(hook, config)
-  if (key) await forgetAdmittedCall(home, key)
+  if (!key || callID(hook)) return
+  await rememberAdmittedCall(home, `${key}-${admissionStamp}`, { decisionId: decision?.id, request, fingerprint: approvalFingerprint(hook, config) })
 }
 
 // Copilot ends a shell tool's result text with this line. It is not a

@@ -263,6 +263,17 @@ test('calls without an ID in one turn report on their own Decisions and are clea
   }
 })
 
+test('a call without an ID that never finished does not take the outcome of a later identical call', async (t) => {
+  const f = await fixture(t)
+  const { toolCallId, ...same } = call('unused', { command: 'echo same' })
+  // The first call is let through and interrupted: no post hook comes for it.
+  await hook(f.home, 'preToolUse', same)
+  await hook(f.home, 'preToolUse', same)
+  await hook(f.home, 'postToolUse', done(same))
+  await flush(await loadConfig(f.home), { home: f.home, force: true })
+  assert.deepEqual(f.reports.map((r) => r.decision_id), [[...f.decisions.keys()][1]])
+})
+
 // Two identical held calls can share one Decision, depending on which hook
 // saves its pending approval first, so this uses a block to deny one of them.
 test('a denied call without an ID leaves its record to no later post hook', async (t) => {
