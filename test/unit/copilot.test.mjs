@@ -263,21 +263,24 @@ test('calls without an ID in one turn report on their own Decisions and are clea
   }
 })
 
-test('of two identical held calls without an ID, the outcome lands on the approved one', async (t) => {
-  const f = await fixture(t, { decide: () => 'PENDING_APPROVAL' })
+// Two identical held calls can share one Decision, depending on which hook
+// saves its pending approval first, so this uses a block to deny one of them.
+test('a denied call without an ID leaves its record to no later post hook', async (t) => {
+  const answers = ['ALLOWED', 'BLOCKED', 'BLOCKED', 'ALLOWED']
+  const f = await fixture(t, { decide: () => answers.shift() })
   await saveSetting(f.home, 'mode', 'enforcing')
-  const { toolCallId, ...held } = call('unused', { command: 'echo held', description: 'Run it' })
-  const both = [1, 2].map(() => hook(f.home, 'preToolUse', held, { ACTERA_HOLD_SECONDS: '3' }))
-  while (f.decisions.size < 2) await new Promise((resolve) => setTimeout(resolve, 20))
-  const [approved, pending] = [...f.decisions.keys()]
-  f.decisions.get(approved).status = 'APPROVED'
-  assert.deepEqual((await Promise.all(both)).map((result) => result.output.permissionDecision).sort(), ['allow', 'deny'])
-  // The denied call left no record, so the one post hook reports the call that ran.
-  assert.equal((await readdir(path.join(f.home, 'tool-calls'))).length, 1)
-  await hook(f.home, 'postToolUse', done(held))
+  const { toolCallId, ...same } = call('unused', { command: 'echo same', description: 'Run it' })
+  // In each turn one of two identical calls is let through and the other denied, in either order.
+  for (let turn = 0; turn < 2; turn++) {
+    const results = [await hook(f.home, 'preToolUse', same), await hook(f.home, 'preToolUse', same)]
+    assert.deepEqual(results.map((result) => result.output?.permissionDecision ?? 'run').sort(), ['deny', 'run'])
+    const waiting = (await readdir(path.join(f.home, 'tool-calls'))).filter((name) => !name.endsWith('-taken.json'))
+    assert.equal(waiting.length, 1, 'Only the call that runs waits for a post hook')
+    await hook(f.home, 'postToolUse', done(same))
+  }
   await flush(await loadConfig(f.home), { home: f.home, force: true })
-  assert.deepEqual(f.reports.map((r) => [r.decision_id, r.outcome]), [[approved, 'SUCCESS']])
-  assert.equal(f.decisions.get(pending).status, 'PENDING_APPROVAL')
+  const ids = [...f.decisions.keys()]
+  assert.deepEqual(f.reports.map((r) => [r.decision_id, r.outcome]).sort(), [[ids[0], 'SUCCESS'], [ids[3], 'SUCCESS']])
 })
 
 test('without a call ID an MCP tool name has to split one way only', async (t) => {
