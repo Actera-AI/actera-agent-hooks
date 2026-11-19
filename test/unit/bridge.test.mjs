@@ -275,7 +275,10 @@ test('a full report queue does not bypass policy evaluation', async (t) => {
   const result = await runHook(home, { hook_event_name: 'PreToolUse', session_id: 'full-queue', tool_use_id: '1', tool_name: 'Bash', tool_input: { command: 'echo run' } })
   assert.equal(result.code, 0)
   assert.equal(result.stdout, '')
-  assert.match((await status(home)).delivery.lastError.message, /Legacy hook queue/)
+  // The background sender records the error shortly after the hook returns.
+  const deadline = Date.now() + 15000
+  while (!(await status(home)).delivery.lastError && Date.now() < deadline) await delay(50)
+  assert.match((await status(home)).delivery.lastError?.message ?? 'no error recorded', /Legacy hook queue/)
   assert.equal(requests.filter((request) => request.path === '/v1/decisions').length, 1)
   assert.equal((await status(home)).pending, 128)
 })
