@@ -275,7 +275,10 @@ test('a full report queue does not bypass policy evaluation', async (t) => {
   const result = await runHook(home, { hook_event_name: 'PreToolUse', session_id: 'full-queue', tool_use_id: '1', tool_name: 'Bash', tool_input: { command: 'echo run' } })
   assert.equal(result.code, 0)
   assert.equal(result.stdout, '')
-  assert.match((await status(home)).delivery.lastError.message, /Legacy hook queue/)
+  // The background sender records the error shortly after the hook returns.
+  const deadline = Date.now() + 15000
+  while (!(await status(home)).delivery.lastError && Date.now() < deadline) await delay(50)
+  assert.match((await status(home)).delivery.lastError?.message ?? 'no error recorded', /Legacy hook queue/)
   assert.equal(requests.filter((request) => request.path === '/v1/decisions').length, 1)
   assert.equal((await status(home)).pending, 128)
 })
@@ -491,11 +494,10 @@ test('host failure and interruption are distinct outcomes for arbitrary tools', 
     })
     assert.equal(reported.code, 0, `PostToolUseFailure failed: ${reported.stderr}`)
   }
-  // Hooks hand reports to the background sender, so wait for it rather than
-  // reading the requests once.
-  const reportedOutcomes = () => requests.filter((item) => item.path.endsWith('/reports') && item.body.outcome && item.body.decision_id)
-  for (let deadline = Date.now() + 15000; reportedOutcomes().length < 2 && Date.now() < deadline;) await delay(50)
-  const outcomes = reportedOutcomes()
+  // Hooks hand reports to the background sender. A forced flush returns once
+  // the queue is empty, so every report has reached the server by then.
+  assert.equal((await flush(await loadConfig(home), { home, force: true })).pending, 0)
+  const outcomes = requests.filter((item) => item.path.endsWith('/reports') && item.body.outcome && item.body.decision_id)
   assert.deepEqual(
     outcomes.map((item) => item.body.outcome),
     ['FAILURE', 'CANCELLED'],
