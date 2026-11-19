@@ -47,9 +47,8 @@ moves to the release in its own pull request, when it needs it.
 
 ## Contract
 
-API changes originate in the backend repository. Export a reviewed contract to
-`actera-api`, release it, and import that exact tag with
-`node scripts/update-contract.mjs <actera-api-checkout>`, then
+Maintainers refresh the contract from the API: they check out an exact contract
+release and run `node scripts/update-contract.mjs <api-checkout>`, then
 `npm run generate:outcomes`. Do not edit the snapshot independently.
 
 ## Bundled scanner
